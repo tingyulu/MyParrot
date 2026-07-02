@@ -4,6 +4,10 @@
 
 [繁體中文說明 →](README.zh-TW.md)
 
+![Main window — recording with a live, speaker-tagged transcript](docs/img/main-window.png)
+
+<img src="docs/img/mini-mode.png" width="412" alt="Floating mini mode while recording">
+
 ## Why stereo-split?
 
 "Who said what" is the hard part of meeting transcription. MyParrot sidesteps it with physics instead of ML: the other side comes from a system-audio tap, you come from the microphone, and each gets its own channel. Split the file, transcribe each track, interleave by time — perfect speaker attribution, fully offline.

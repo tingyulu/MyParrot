@@ -4,6 +4,10 @@
 
 [English README →](README.md)
 
+![主視窗 — 錄音中,即時逐字稿自動標好講者](docs/img/main-window.png)
+
+<img src="docs/img/mini-mode.png" width="412" alt="錄音中的懸浮迷你模式">
+
 ## 為什麼分軌?
 
 會議逐字稿最難的是「誰說了什麼」。MyParrot 用物理繞過機器學習:對方走系統音訊 tap、你走麥克風,各佔一個聲道。拆軌、各自辨識、按時間交織——講者歸屬零錯誤,完全離線。
