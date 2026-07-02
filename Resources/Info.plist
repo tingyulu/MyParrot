@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>MyParrot</string>
+    <key>CFBundleDisplayName</key>
+    <string>MyParrot</string>
+    <key>CFBundleIdentifier</key>
+    <string>tw.uncle.MyParrot</string>
+    <key>CFBundleExecutable</key>
+    <string>MyParrot</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>15.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.productivity</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>MyParrot 需要擷取系統音訊,才能錄下會議中「對方」的聲音。</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>MyParrot 需要麥克風,才能錄下「你」的聲音。</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>MyParrot 使用本機語音辨識把錄音轉成逐字稿。</string>
+</dict>
+</plist>
