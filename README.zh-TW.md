@@ -30,7 +30,13 @@
 - **Swift 6 工具鏈** — **Command Line Tools 就夠** build、跑、自測;只有 `swift test` 需要完整 Xcode
 - **cmake**(`brew install cmake`)——一次性,只為了從原始碼建置本機 Whisper 引擎(見下方快速開始)
 
-## 快速開始
+## 下載
+
+上 **[Releases](https://github.com/tingyulu/MyParrot/releases/latest)** 抓最新簽章+公證版,解壓縮後把 `MyParrot.app` 拖進 `/Applications` 就能用,不需要任何建置工具,Gatekeeper 不會擋(Developer ID 簽章+公證過)。
+
+想自己 build 原始碼?見下方。
+
+## 自行建置
 
 ```bash
 git clone <this-repo> && cd MyParrot

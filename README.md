@@ -30,7 +30,13 @@
 - **Swift 6 toolchain** — Xcode **Command Line Tools are enough** to build, run, and self-test. Full Xcode is only needed for `swift test`.
 - **cmake** (`brew install cmake`) — one-time only, to build the local Whisper engine from source (see Quick start)
 
-## Quick start
+## Download
+
+Grab the latest signed & notarized build from **[Releases](https://github.com/tingyulu/MyParrot/releases/latest)** — download the `.zip`, unzip, drag `MyParrot.app` into `/Applications`. No build tools needed; Gatekeeper won't complain (Developer ID signed + notarized).
+
+Prefer to build from source? See below.
+
+## Build from source
 
 ```bash
 git clone <this-repo> && cd MyParrot
@@ -75,7 +81,7 @@ Sources/MyParrotCore/        Library: capture, mux, transcription, export
   EchoCleanup / EchoCanceller / DelayEstimator   Offline AEC (bulk-delay + NLMS)
   Transcription/             SpeechAnalyzer (live + file) + SFSpeech fallback,
                               local Whisper engine (whisper.cpp/Metal) + model manager
-  SelfTest.swift             12 self-test cases (shared by CLI runner & swift test)
+  SelfTest.swift             15 self-test cases (shared by CLI runner & swift test)
 Sources/MyParrot/            SwiftUI app (main window, mini mode, settings, mascot)
 Sources/MyParrotSelfTest/    CLI test runner — works with Command Line Tools only
 Tests/MyParrotTests/         Swift Testing wrappers (one @Test per self-test case)
