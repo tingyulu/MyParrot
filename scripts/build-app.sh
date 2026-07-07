@@ -64,17 +64,25 @@ fi
 # rebuilds → permissions asked ONCE. A self-signed cert (no Team ID) degrades to
 # a per-build cdhash match → re-prompts every rebuild. Preference order:
 #   1) $CODESIGN_IDENTITY override
-#   2) any *valid* Apple Development / Developer ID identity in the keychain
-#   3) the self-signed "MyParrot Dev" (works, but TCC won't persist across builds)
-#   4) ad-hoc
+#   2) Developer ID Application (works for local TCC same as Apple Development,
+#      AND is the only cert type Apple's notary service accepts — so the default
+#      dev-loop build is already release/notarize-ready with no separate mode)
+#   3) Apple Development
+#   4) the self-signed "MyParrot Dev" (works, but TCC won't persist across builds)
+#   5) ad-hoc
+HARDENED=0
 if [ -n "${CODESIGN_IDENTITY:-}" ]; then
   SIGN_ID="$CODESIGN_IDENTITY"
   echo "▶ codesign with override identity: $SIGN_ID"
+  HARDENED=1
 else
   REAL_ID="$(security find-identity -v -p codesigning 2>/dev/null \
-    | grep -oE '"(Apple Development|Developer ID Application)[^"]*"' | head -1 | tr -d '"' || true)"
+    | grep -oE '"Developer ID Application[^"]*"' | head -1 | tr -d '"' || true)"
+  [ -z "$REAL_ID" ] && REAL_ID="$(security find-identity -v -p codesigning 2>/dev/null \
+    | grep -oE '"Apple Development[^"]*"' | head -1 | tr -d '"' || true)"
   if [ -n "$REAL_ID" ]; then
     SIGN_ID="$REAL_ID"
+    HARDENED=1
     echo "▶ codesign with Apple identity (TCC 跨版本保留): $SIGN_ID"
   elif security find-identity 2>/dev/null | grep -q "MyParrot Dev"; then
     SIGN_ID="MyParrot Dev"
@@ -88,6 +96,12 @@ else
   fi
 fi
 
+# Hardened Runtime + a secure timestamp are required for notarization (scripts/
+# notarize.sh) and harmless for plain local testing, so apply them whenever
+# signing with any real Apple identity — one build works for both purposes.
+CODESIGN_OPTS=()
+[ "$HARDENED" = 1 ] && CODESIGN_OPTS=(--options runtime --timestamp)
+
 # The project lives in iCloud Drive, whose fileprovider keeps re-adding the
 # com.apple.FinderInfo xattr that blocks codesign. Retry a few times to catch a
 # clean window (strip → sign immediately).
@@ -97,10 +111,10 @@ for attempt in 1 2 3 4 5; do
   # 內層先簽:嵌入的 framework 必須在外層 app 簽章前完成(nested code rule)。
   # (if 寫法防 set -e:框架簽失敗只警告,交由外層簽章的重試機制處理)
   if [ -d "$APP/Contents/Frameworks/whisper.framework" ]; then
-    codesign --force --sign "$SIGN_ID" "$APP/Contents/Frameworks/whisper.framework" \
+    codesign --force --sign "$SIGN_ID" "${CODESIGN_OPTS[@]}" "$APP/Contents/Frameworks/whisper.framework" \
       || echo "⚠️ whisper.framework 簽章失敗(attempt $attempt)"
   fi
-  if codesign --force --sign "$SIGN_ID" --entitlements Resources/MyParrot.entitlements "$APP" 2>/dev/null; then
+  if codesign --force --sign "$SIGN_ID" "${CODESIGN_OPTS[@]}" --entitlements Resources/MyParrot.entitlements "$APP" 2>/dev/null; then
     signed=1; break
   fi
   sleep 1
