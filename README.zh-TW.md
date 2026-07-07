@@ -16,8 +16,9 @@
 
 - **對方聲音** — Core Audio **Process Tap**(macOS 14.4+):不裝驅動、不裝核心擴充、不建虛擬音訊裝置
 - **你的聲音** — AVAudioEngine 麥克風擷取,**錄音中裝置/路由變更也不斷**(configuration-change 自癒 + 心跳看門狗;錄音中熱切換麥克風、檔案保持連續)
-- **即時逐字稿** — macOS 26 SpeechAnalyzer(長時串流),舊系統自動 fallback SFSpeechRecognizer
-- **舊錄音轉逐字稿** → `.txt` + 帶時間碼、講者前綴的 `.srt`
+- **即時逐字稿** — 三選一引擎:macOS 26 **SpeechAnalyzer**(長時串流,舊系統自動 fallback SFSpeechRecognizer),或全離線的 **Whisper** 引擎(whisper.cpp + Metal,large-v3 系列)——中英夾雜辨識更準;錄音中即時轉完,停止後自動升級成高精度重轉一次
+- Whisper 模型可在 app 內下載(設定頁)或自己丟一顆 `ggml-*.bin` 進 Application Support——不內建、不打電話回家
+- **舊錄音轉逐字稿** → `.txt` + 帶時間碼、講者前綴的 `.srt`,Whisper 輸出自動簡轉繁
 - **離線回音消除**(選用、非破壞式——另存 `*_aec.m4a`,原檔永不被動)
 - CAF→m4a 自動轉檔、錄音中防誤關、懸浮迷你模式、增益+軟限幅
 - 介面:繁中/簡中/英/日/韓
@@ -27,13 +28,15 @@
 
 - **macOS 14.4+**(系統音訊 Process Tap)——**建議 26.1+**(即時逐字稿;26.0 有已知 process-tap regression)
 - **Swift 6 工具鏈** — **Command Line Tools 就夠** build、跑、自測;只有 `swift test` 需要完整 Xcode
+- **cmake**(`brew install cmake`)——一次性,只為了從原始碼建置本機 Whisper 引擎(見下方快速開始)
 
 ## 快速開始
 
 ```bash
 git clone <this-repo> && cd MyParrot
-swift build                 # 編譯驗證
-bash scripts/build-app.sh   # 組裝、簽章、裝到 ~/Applications
+bash scripts/fetch-whisper.sh   # 一次性:從原始碼建置本機 Whisper 引擎(~5-10 分鐘,需 Xcode + cmake)
+swift build                     # 編譯驗證
+bash scripts/build-app.sh       # 組裝、簽章、裝到 ~/Applications
 open ~/Applications/MyParrot.app
 ```
 
@@ -44,6 +47,7 @@ open ~/Applications/MyParrot.app
 1. **簽章與權限記憶。** macOS 的權限(TCC)綁簽章身份。`build-app.sh` 自動選最好的:Apple Development / Developer ID 憑證(有 Team ID → **重 build 權限不重問**)→ 自簽 → ad-hoc(**每次重 build 都重問**)。只要鑰匙圈裡有 Apple 憑證,腳本會自己找到。
 2. **`.app` 別放 iCloud 同步目錄。** iCloud Drive 會反覆重貼 Finder xattr、弄壞簽章——所以腳本裝到 `~/Applications`。
 3. **麥克風別用藍牙耳機。** 任何 app 一開藍牙麥,整條藍牙鏈路就從 A2DP 掉到窄頻 HFP——**連對方的聲音都跟著變電話音質**。耳機拿來聽,講話用內建/有線/USB 麥。(自動選麥已避開藍牙;手動選仍可,但會警告。)
+4. **clone 後第一次 `swift build` 就失敗?** 先跑 `bash scripts/fetch-whisper.sh`。Whisper 引擎的二進位(~35MB)沒進 git——這支腳本第一次會從原始碼建置(需要 Xcode + `cmake`)。
 
 ## 已知限制
 

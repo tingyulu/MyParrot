@@ -23,5 +23,9 @@ struct SelfTestCases {
     @Test("設定·靈敏度增益 ×2")        func gainScaling()      { check(SelfTest.gainScaling()) }
     @Test("CAF→m4a 匯出(更小且可讀)")  func m4aExport()        { check(SelfTest.m4aExport()) }
     @Test("SRT 時間碼+講者格式")        func srtFormat()        { check(SelfTest.srtFormat()) }
+    @Test("逐字稿「最近 3 分鐘」視窗") func transcriptWindow() { check(SelfTest.transcriptWindow()) }
+    @Test("Whisper VAD 切塊 + 簡轉繁") func whisperChunkerAndZhTW() { check(SelfTest.whisperChunkerAndZhTW()) }
+    @Test("Whisper 幻覺防呆(連續複讀≥3 次壓下)") func whisperHallucinationGate() { check(SelfTest.whisperHallucinationGate()) }
     @Test("回音消除(NLMS)合成驗證")    func echoCancel()       { check(SelfTest.echoCancel()) }
+    @Test("AEC 無回音 gate(戴耳機略過)") func aecNoEchoGate()   { check(SelfTest.aecNoEchoGate()) }
 }

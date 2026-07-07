@@ -34,7 +34,23 @@ public final class RecordingController {
     public var aecEnabled = false { didSet { defaults.set(aecEnabled, forKey: "aecSoftware") } }
     public var selectedInputDevice: AudioInputDevice?
     public var availableInputDevices: [AudioInputDevice] = []
-    public var engine: TranscriptionEngine = .appleNative
+    public var engine: TranscriptionEngine = .appleNative {
+        didSet {
+            guard oldValue != engine else { return }
+            defaults.set(engine.rawValue, forKey: "engine")
+            if state == .recording || state == .paused {
+                needsEngineRebuild = true
+                deviceChangeWarning = "逐字稿引擎將於本次錄音結束後生效"
+            } else {
+                rebuildTranscribers()
+            }
+        }
+    }
+    /// Phase C(TR-19):錄音轉檔完成後自動用高精度引擎重轉——live 稿=會中參考,
+    /// 檔案稿=記錄真相。預設開;Whisper 模型未安裝時自動略過。
+    public var autoTranscribeAfterStop = true {
+        didSet { defaults.set(autoTranscribeAfterStop, forKey: "autoTranscribe") }
+    }
     public var liveTranscribeEnabled = true
     public var language: TranscriptionLanguage = .system { didSet { defaults.set(language.rawValue, forKey: "language") } }
     public var resolvedLocale: Locale { language.resolved() }
@@ -51,8 +67,11 @@ public final class RecordingController {
     private var mic = MicCapture()
     private let monitor = MicCapture()
     private let recorder = StereoRecorder()
-    private let fileTranscriber: any TranscriptionProvider
-    private let live: any LiveTranscribing
+    // `var`:引擎可依設定切換(TR-14),rebuildTranscribers() 重建。
+    private var fileTranscriber: any TranscriptionProvider
+    private var live: any LiveTranscribing
+    /// live+file 共用的 whisper context(單一模型載入一份)。
+    private var whisperEngine: WhisperCppEngine?
 
     private var player: AVAudioPlayer?
     private var playbackTicker: Timer?
@@ -79,6 +98,18 @@ public final class RecordingController {
     private static let micDeadAfter: TimeInterval = 3        // no buffers this long → rebuild
     private static let micRebuildCooldown: TimeInterval = 2  // min gap between auto-rebuilds
     private static let micMaxConsecutiveRebuilds = 3         // give up & warn after this many failed in a row
+    /// BUG-22:對方(系統音訊)tap 是原生 Core Audio Process Tap + 私有 aggregate
+    /// device(非 AVAudioEngine),沒有「引擎自己停了」的系統通知可監聽,且錄音
+    /// 開始時只讀一次當下的預設輸出裝置、之後裝置變了也不會跟——2026-07-07 實
+    /// 例:AirPods 錄音中連上、預設輸出切走,tap 繼續對著沒人在用的舊裝置,對方
+    /// 軌整段真靜音。比照 BUG-18 補同一套「buffer 停止流動 → 自動重建」看門狗。
+    private var lastSysLevelAt = Date()
+    private var sysAutoRebuildCount = 0
+    private var lastSysRebuildAt = Date.distantPast
+    private var silentSysWarned = false
+    private static let sysDeadAfter: TimeInterval = 5        // aggregate/tap 重建較慢,門檻比麥克風寬鬆些
+    private static let sysRebuildCooldown: TimeInterval = 2
+    private static let sysMaxConsecutiveRebuilds = 3
 
     /// True once that channel has actually picked up sound this recording — the
     /// live "yes, your voice is being captured" confirmation during a meeting.
@@ -95,15 +126,15 @@ public final class RecordingController {
         } else {
             recordingsDir = docs.appendingPathComponent("MyParrot", isDirectory: true)
         }
-        // Prefer the macOS 26 SpeechAnalyzer engine (true long-form streaming);
-        // fall back to SFSpeech on older systems. Assign before any self use.
-        if #available(macOS 26.0, *) {
-            live = SpeechAnalyzerLiveTranscriber()
-            fileTranscriber = SpeechAnalyzerFileProvider()
-        } else {
-            live = LiveTranscriber()
-            fileTranscriber = AppleSpeechProvider()
-        }
+        // 逐字稿引擎依設定選(TR-14):Whisper 本地/雲端/Apple 原生;所選引擎
+        // 不可用(模型未裝/key 未設)自動回退 Apple。Assign before any self use.
+        let savedEngine = UserDefaults.standard.string(forKey: "engine")
+            .flatMap(TranscriptionEngine.init(rawValue:)) ?? .appleNative
+        engine = savedEngine
+        let built = Self.buildTranscribers(for: savedEngine)
+        live = built.live
+        fileTranscriber = built.file
+        whisperEngine = built.whisper
         // All stored properties are initialized below this point.
         try? FileManager.default.createDirectory(at: recordingsDir, withIntermediateDirectories: true)
         migrateLegacyRecordings(into: recordingsDir)
@@ -113,11 +144,68 @@ public final class RecordingController {
             inputGain = min(2.0, max(0.5, Float(UserDefaults.standard.double(forKey: "inputGain"))))
         }
         aecEnabled = UserDefaults.standard.bool(forKey: "aecSoftware")
+        if UserDefaults.standard.object(forKey: "autoTranscribe") != nil {
+            autoTranscribeAfterStop = UserDefaults.standard.bool(forKey: "autoTranscribe")
+        }
         loadRecordings()
         resumePendingConversions()
         refreshDevices()
         installDeviceListener()
         live.onUpdate = { [weak self] lines in self?.liveTranscript = lines }
+        if let note = built.note { deviceChangeWarning = note }
+    }
+
+    // MARK: - 逐字稿引擎建構(TR-14)
+
+    private static func buildTranscribers(for engine: TranscriptionEngine)
+        -> (live: any LiveTranscribing, file: any TranscriptionProvider,
+            whisper: WhisperCppEngine?, note: String?) {
+        switch engine {
+        case .whisperKit:
+            if let url = WhisperModelStore.activeModelURL() {
+                let eng = WhisperCppEngine(modelURL: url)
+                return (WhisperLiveTranscriber(engine: eng),
+                        WhisperCppFileProvider(engine: eng), eng, nil)
+            }
+            let (l, f) = appleTranscribers()
+            return (l, f, nil, "Whisper 模型未安裝 — 到設定下載後生效,暫用 macOS 原生引擎")
+        case .cloud:
+            // Phase B:CloudSTTAdapter 接線後替換此 fallback。
+            let (l, f) = appleTranscribers()
+            return (l, f, nil, "雲端引擎尚未設定,暫用 macOS 原生引擎")
+        case .appleNative:
+            let (l, f) = appleTranscribers()
+            return (l, f, nil, nil)
+        }
+    }
+
+    private static func appleTranscribers() -> (any LiveTranscribing, any TranscriptionProvider) {
+        if #available(macOS 26.0, *) {
+            return (SpeechAnalyzerLiveTranscriber(), SpeechAnalyzerFileProvider())
+        } else {
+            return (LiveTranscriber(), AppleSpeechProvider())
+        }
+    }
+
+    /// 設定頁模型變更後重建引擎(錄音中不動,下次開錄前生效)。
+    public func reloadTranscriptionEngine() {
+        guard state != .recording, state != .paused else {
+            needsEngineRebuild = true
+            deviceChangeWarning = "逐字稿引擎將於本次錄音結束後生效"
+            return
+        }
+        rebuildTranscribers()
+    }
+    private var needsEngineRebuild = false
+
+    /// 引擎切換(僅 idle/finished 呼叫;錄音中由 didSet 延後)。
+    private func rebuildTranscribers() {
+        let built = Self.buildTranscribers(for: engine)
+        live = built.live
+        fileTranscriber = built.file
+        whisperEngine = built.whisper
+        live.onUpdate = { [weak self] lines in self?.liveTranscript = lines }
+        if let note = built.note { deviceChangeWarning = note }
     }
 
     // MARK: - Permissions (requested up-front on launch)
@@ -252,6 +340,24 @@ public final class RecordingController {
         }
     }
 
+    /// BUG-22:對方(系統音訊)tap 的重建——比照 rebuildCurrentMic,但
+    /// SystemAudioCapture 是原生 Core Audio tap+aggregate(非 AVAudioEngine),
+    /// 沒有引擎自己停了的通知,靠這裡統一補:輸出裝置變更(installDeviceListener
+    /// 立即觸發)或 buffer 停止流動(watchdog 逾時觸發)都走同一條路徑。
+    /// stop()+start() 重用同一個 SystemAudioCapture 實例——tap/aggregate 每次
+    /// start() 都建新 UUID(見 SystemAudioCapture.swift),可安全反覆重建,不必
+    /// 像 MicCapture 那樣另開新實例。
+    private func rebuildSystemCapture(reason: String) {
+        system.stop()
+        do {
+            try system.start()
+            lastSysLevelAt = Date()
+            deviceChangeWarning = "偵測到系統音訊擷取中斷(\(reason)),已自動重新啟動"
+        } catch {
+            lastError = "系統音訊自動重建失敗(\(reason)):\(error)"
+        }
+    }
+
     /// Soft-default the mic toward the most reliable source. Bluetooth forces
     /// narrowband HFP + gets grabbed by the meeting app (dead recording); iPhone
     /// Continuity drops mid-recording (research: not proven fixed even wired). So
@@ -322,6 +428,13 @@ public final class RecordingController {
             try monitor.start(deviceID: selectedInputDevice?.id)
             isMonitoring = true
         } catch {
+            // G-1 審查發現:若上面 start() 在 tap 已裝之後才失敗,`monitor` 帶著
+            // 洩漏的 tap 進到這裡;`start()` 的 guard 只看 `isRunning`(此時仍
+            // 是 false)擋不住重入,直接對同一顆 engine 的 bus 0 再裝一次 tap
+            // 會撞 AVAudioEngine fatal exception(nullptr == Tap())。重試前先
+            // stop() 讓 G-1 修好的 tapInstalled 清乾淨,同上面第一次嘗試前的
+            // 防禦性 stop()。
+            monitor.stop()
             // Retry on the system default device before giving up.
             do { try monitor.start(deviceID: nil); isMonitoring = true }
             catch { lastError = "麥克風測試失敗:\(error)" }
@@ -336,6 +449,7 @@ public final class RecordingController {
 
     public func startRecording() {
         guard state == .idle || state == .finished else { return }
+        if needsEngineRebuild { rebuildTranscribers(); needsEngineRebuild = false }
         stopMicMonitor()   // free the mic before recording
         stopPlayback()
         let date = Date()
@@ -346,8 +460,9 @@ public final class RecordingController {
         liveTranscript = []
         deviceChangeWarning = nil
         lastError = nil
-        micPeak = 0; sysPeak = 0; silentMicWarned = false
+        micPeak = 0; sysPeak = 0; silentMicWarned = false; silentSysWarned = false
         lastMicLevelAt = Date(); micAutoRebuildCount = 0; lastMicRebuildAt = .distantPast
+        lastSysLevelAt = Date(); sysAutoRebuildCount = 0; lastSysRebuildAt = .distantPast
         mic.gain = inputGain
 
         // Capture plain references/values so the audio-thread callbacks never touch
@@ -356,7 +471,10 @@ public final class RecordingController {
         let live = self.live
         let liveOn = self.liveTranscribeEnabled
         system.onLevel = { [weak self] v in Task { @MainActor in
-            guard let self else { return }; self.otherLevel = v; self.sysPeak = max(self.sysPeak, v) } }
+            guard let self else { return }
+            self.otherLevel = v; self.sysPeak = max(self.sysPeak, v)
+            // Buffers are flowing → the tap is alive (BUG-22 watchdog, mirrors mic below).
+            self.lastSysLevelAt = Date(); self.sysAutoRebuildCount = 0 } }
         mic.onLevel = { [weak self] v in Task { @MainActor in
             guard let self else { return }
             self.youLevel = v; self.micPeak = max(self.micPeak, v)
@@ -420,10 +538,10 @@ public final class RecordingController {
             let rec = Recording(id: UUID(),
                                 title: currentTitle.isEmpty ? "錄音" : currentTitle,
                                 url: url, date: startDate, duration: accumulated,
-                                hasTranscript: false, savedToDrive: false,
+                                hasTranscript: false,
                                 isConverting: url.pathExtension == "caf")
             recordings.insert(rec, at: 0)
-            convertToM4A(rec)
+            convertToM4A(rec, autoTranscribe: autoTranscribeAfterStop)
         }
         state = .finished
     }
@@ -433,7 +551,7 @@ public final class RecordingController {
     /// produce a separate `…_aec.m4a` (non-destructive) — so a bad AEC run can never
     /// damage or lose the real recording (see PRD「AEC 追查」: offline AEC currently
     /// can't reach the real 44–165ms echo delay; kept opt-in + non-destructive).
-    private func convertToM4A(_ rec: Recording) {
+    private func convertToM4A(_ rec: Recording, autoTranscribe: Bool = false) {
         let caf = rec.url
         guard caf.pathExtension == "caf" else { return }
         // Guard empty/instant recordings: AVAssetExportSession fails with -11800 on a
@@ -475,6 +593,13 @@ public final class RecordingController {
                     }
                 }
                 try? FileManager.default.removeItem(at: caf)
+                // Phase C(TR-19):剛錄完的檔自動跑高精度重轉(僅 Whisper 引擎可用
+                // 且來自「停止錄音」路徑——resumePendingConversions 不觸發,避免
+                // 每次啟動無預警吃 CPU)。
+                if autoTranscribe, whisperEngine != nil,
+                   let i = recordings.firstIndex(where: { $0.id == rec.id }) {
+                    transcribe(recordings[i])
+                }
             } catch {
                 lastError = "轉 m4a 失敗:\(error)"
                 if let i = recordings.firstIndex(where: { $0.id == rec.id }) {
@@ -518,12 +643,6 @@ public final class RecordingController {
         }
     }
 
-    /// MVP placeholder. v1.x: upload file + transcript via official Google Drive API,
-    /// transcript saved as a Google Doc, then deep-link to the NotebookLM import page.
-    public func saveToDrive(_ rec: Recording) {
-        if let idx = recordings.firstIndex(of: rec) { recordings[idx].savedToDrive = true }
-    }
-
     // MARK: - Internals
 
     private func startTicker() {
@@ -544,6 +663,16 @@ public final class RecordingController {
                     self.lastMicRebuildAt = now
                     self.rebuildCurrentMic(reason: "你軌訊號中斷")
                 }
+                // BUG-22:對方(系統音訊)tap 同一套看門狗——buffer 停止流動(死於
+                // 開錄瞬間 system.start() 拋錯被靜默吞掉,或錄音中途 tap/aggregate
+                // 失效)都靠這裡統一補救,不必先查清楚是哪一種。
+                if now.timeIntervalSince(self.lastSysLevelAt) > Self.sysDeadAfter,
+                   self.sysAutoRebuildCount < Self.sysMaxConsecutiveRebuilds,
+                   now.timeIntervalSince(self.lastSysRebuildAt) > Self.sysRebuildCooldown {
+                    self.sysAutoRebuildCount += 1
+                    self.lastSysRebuildAt = now
+                    self.rebuildSystemCapture(reason: "對方軌訊號中斷")
+                }
                 // After 8s, if your mic still hasn't picked up anything, warn — your
                 // voice channel is dead (usually the wrong input device is selected).
                 if self.elapsed > 8, self.micPeak < Self.silenceThreshold, !self.silentMicWarned {
@@ -551,6 +680,12 @@ public final class RecordingController {
                     self.deviceChangeWarning = self.selectedInputDevice?.isBluetooth == true
                         ? "⚠️ 你選的是藍牙麥克風,整場可能收不到聲音(常被會議 app 佔住或掉窄頻)— 請到設定改用內建或 USB 麥克風"
                         : "你的麥克風似乎沒收到聲音 — 請到設定確認「你的麥克風」選對裝置"
+                }
+                // 對方軌對稱的 8s 死聲道警告(BUG-22 前這裡完全沒有——22 分鐘會議
+                // 錄完才發現對方軌是空的,現在 8 秒就能看到警示)。
+                if self.elapsed > 8, self.sysPeak < Self.silenceThreshold, !self.silentSysWarned {
+                    self.silentSysWarned = true
+                    self.deviceChangeWarning = "對方(系統音訊)似乎沒收到聲音 — 請確認會議/通話音訊有在這台 Mac 上播放"
                 }
             }
         }
@@ -589,7 +724,6 @@ public final class RecordingController {
             return Recording(id: UUID(), title: url.deletingPathExtension().lastPathComponent,
                              url: url, date: date, duration: duration,
                              hasTranscript: FileManager.default.fileExists(atPath: txt.path),
-                             savedToDrive: false,
                              isConverting: url.pathExtension == "caf")
         }.sorted { $0.date > $1.date }
     }
@@ -605,11 +739,11 @@ public final class RecordingController {
     private func installDeviceListener() {
         guard !deviceListenerInstalled else { return }
         deviceListenerInstalled = true
-        var address = AudioObjectPropertyAddress(
+        var inputAddress = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultInputDevice,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
-        AudioObjectAddPropertyListenerBlock(AudioObjectID.system, &address, DispatchQueue.main) { [weak self] _, _ in
+        AudioObjectAddPropertyListenerBlock(AudioObjectID.system, &inputAddress, DispatchQueue.main) { [weak self] _, _ in
             Task { @MainActor in
                 guard let self else { return }
                 // Snapshot the device we're actually recording from BEFORE refreshDevices(),
@@ -627,6 +761,29 @@ public final class RecordingController {
                 } else {
                     self.deviceChangeWarning = "偵測到音訊裝置變更,錄音續行中,請確認狀態"
                 }
+            }
+        }
+        // BUG-22:對方(系統音訊)tap 綁的是「錄音開始那一刻」的預設輸出裝置,
+        // 完全沒監聽後續變化——實錄中 AirPods 錄音中途連上、預設輸出切走,
+        // tap 繼續對著沒人在用的舊裝置錄,對方軌整段真靜音。加對稱的輸出
+        // 裝置監聽,變了就立即重建 tap(不必等 watchdog 逾時)。
+        var outputAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        AudioObjectAddPropertyListenerBlock(AudioObjectID.system, &outputAddress, DispatchQueue.main) { [weak self] _, _ in
+            Task { @MainActor in
+                guard let self, self.state == .recording else { return }
+                // 審查發現:這條路徑原本完全繞過 watchdog 的節流,藍牙裝置握手
+                // 期間常見連續幾次裝置變更通知,會無節流地反覆拆建真的 tap/
+                // aggregate。跟 watchdog 共用同一組計數/冷卻,總重建次數才是
+                // 真正有上限。
+                let now = Date()
+                guard now.timeIntervalSince(self.lastSysRebuildAt) > Self.sysRebuildCooldown,
+                      self.sysAutoRebuildCount < Self.sysMaxConsecutiveRebuilds else { return }
+                self.sysAutoRebuildCount += 1
+                self.lastSysRebuildAt = now
+                self.rebuildSystemCapture(reason: "系統輸出裝置變更")
             }
         }
     }

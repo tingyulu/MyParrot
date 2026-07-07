@@ -23,6 +23,9 @@ public enum SelfTest {
             gainScaling(),
             m4aExport(),
             srtFormat(),
+            transcriptWindow(),
+            whisperChunkerAndZhTW(),
+            whisperHallucinationGate(),
             echoCancel(),
             aecNoEchoGate()
         ]
@@ -34,8 +37,8 @@ public enum SelfTest {
     static func fileNameFormat() -> Result {
         var c = DateComponents(); c.year = 2026; c.month = 6; c.day = 22; c.hour = 14; c.minute = 30
         let date = Calendar.current.date(from: c)!
-        let name = Recording.fileName(date: date, title: "客戶會議-CMoney")
-        let want = "2026-06-22 1430 客戶會議-CMoney.caf"
+        let name = Recording.fileName(date: date, title: "客戶會議-ABC公司")
+        let want = "2026-06-22 1430 客戶會議-ABC公司.caf"
         return Result(name: "檔名範本 日期+時間+會議名", passed: name == want,
                       detail: name == want ? name : "得到 \(name)")
     }
@@ -217,6 +220,66 @@ public enum SelfTest {
               && srt.contains("2\n00:00:02,000 --> ")
               && srt.contains("你: 測試")
         return Result(name: "SRT 時間碼+講者格式", passed: ok, detail: ok ? "" : srt)
+    }
+
+    // UI-10/BUG-20:「最近 3 分鐘」視窗 — 錨定最後一行、非牆鐘;舊檔均勻時間退化全顯。
+    static func transcriptWindow() -> Result {
+        let base = Date(timeIntervalSince1970: 1_000_000)
+        func line(_ sec: TimeInterval) -> TranscriptLine {
+            TranscriptLine(isYou: false, time: base.addingTimeInterval(sec), text: "t\(Int(sec))", isFinal: true, start: sec, duration: 1)
+        }
+        let spread = [line(0), line(200), line(400), line(500), line(600)]   // 10 分鐘散佈
+        let recent = TranscriptWindow.visible(spread, full: false)           // 錨 600 → cutoff 420
+        let full = TranscriptWindow.visible(spread, full: true)
+        let uniform = [line(300), line(300), line(300)]                      // 舊檔轉稿:同時間
+        let uniformRecent = TranscriptWindow.visible(uniform, full: false)
+        let empty = TranscriptWindow.visible([], full: false)
+        let ok = recent.map(\.text) == ["t500", "t600"] && full.count == 5
+              && uniformRecent.count == 3 && empty.isEmpty
+        return Result(name: "逐字稿「最近 3 分鐘」視窗(錨最後一行)", passed: ok,
+                      detail: ok ? "" : "recent=\(recent.map(\.text)) full=\(full.count) uniform=\(uniformRecent.count)")
+    }
+
+    // TR-15/17:Whisper live 的 VAD 切塊(語音+尾靜音→切、短雜訊→丟、6s 強制切)
+    // + OpenCC 簡→繁(台灣詞:软件→軟體)。
+    static func whisperChunkerAndZhTW() -> Result {
+        func block(_ n: Int, _ v: Float) -> [Float] { [Float](repeating: v, count: n) }
+        // ① 2s 語音 + 0.8s 靜音 → 切出一塊(含尾靜音、起點 0)
+        var ck = VadChunker()
+        var chunks = ck.feed(block(32_000, 0.1))
+        chunks += ck.feed(block(12_800, 0.0))
+        let cutOK = chunks.count == 1 && chunks[0].samples.count == 44_800 && chunks[0].startOffset == 0
+        // ② 0.2s 雜訊尖峰 + 靜音 → 丟棄不轉
+        var ck2 = VadChunker()
+        var c2 = ck2.feed(block(3_200, 0.1))
+        c2 += ck2.feed(block(12_800, 0.0))
+        let dropOK = c2.isEmpty
+        // ③ 連續語音達 6s → 強制切
+        var ck3 = VadChunker()
+        let c3 = ck3.feed(block(96_000, 0.1))
+        let maxOK = c3.count == 1
+        // ④ ZhTW s2twp
+        let tw = ZhTW.convert("软件质量很好")
+        let twOK = tw.contains("軟體") && tw.contains("質")
+        let ok = cutOK && dropOK && maxOK && twOK
+        return Result(name: "Whisper VAD 切塊 + 簡轉繁", passed: ok,
+                      detail: ok ? "切塊/丟雜訊/強制切 OK;软件→\(tw.prefix(2))"
+                                 : "cut=\(cutOK) drop=\(dropOK) max=\(maxOK) tw=\(tw)")
+    }
+
+    // BUG-21:音樂等非語音音訊有時騙過 no_speech_prob、被 whisper 鎖死複讀同一句
+    // (temperature=0 貪婪解碼+每塊音樂內容相似→決定性重複)。同句連續 ≥3 塊才壓下
+    // (前兩次仍顯示,不誤殺真實的短句重複,如「對對對」)。
+    static func whisperHallucinationGate() -> Result {
+        var g = HallucinationGate()
+        let r1 = g.check("我會把這張照片放在我的手上。")   // 1st,正常顯示
+        let r2 = g.check("我會把這張照片放在我的手上。")   // 2nd,仍顯示(不誤殺短句重複)
+        let r3 = g.check("我會把這張照片放在我的手上。")   // 3rd,失控複讀→壓下
+        let r4 = g.check("我會把這張照片放在我的手上。")   // 持續壓下
+        let r5 = g.check("這是新的一句")                    // 換句 → 恢復顯示
+        let ok = r1 && r2 && !r3 && !r4 && r5
+        return Result(name: "Whisper 幻覺防呆(連續複讀≥3 次壓下)", passed: ok,
+                      detail: ok ? "" : "r1=\(r1) r2=\(r2) r3=\(r3) r4=\(r4) r5=\(r5)")
     }
 
     private final class ErrorBox: @unchecked Sendable { var error: Error? }

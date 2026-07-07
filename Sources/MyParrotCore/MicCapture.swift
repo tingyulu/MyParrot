@@ -20,6 +20,14 @@ final class MicCapture: @unchecked Sendable {
 
     private let engine = AVAudioEngine()
     private(set) var isRunning = false
+    /// G-1 (跟 BUG-22 同一類縫): tracks whether the tap is actually installed,
+    /// independent of `isRunning` — `engine.start()` can throw *after* the tap is
+    /// already attached (`buildAndStart()`), leaving `isRunning` false. `stop()`
+    /// must still know to remove that leaked tap. Unlike BUG-22's `tapID`/
+    /// `aggregateID` (real CoreAudio handles that ARE the resource), this is a
+    /// hand-synced bool — any future `installTap`/`removeTap` call site must keep
+    /// it in sync too.
+    private var tapInstalled = false
 
     /// The device this engine is pinned to (nil = system default). Remembered so the
     /// configuration-change self-heal can re-pin the same device (AUD-27 / BUG-18).
@@ -56,6 +64,7 @@ final class MicCapture: @unchecked Sendable {
             self.onLevel?(buffer.rmsLevel)
             self.onBuffer?(buffer)
         }
+        tapInstalled = true
 
         engine.prepare()
         try engine.start()
@@ -85,6 +94,7 @@ final class MicCapture: @unchecked Sendable {
     private func rebuildAfterConfigurationChange() {
         guard isRunning else { return }
         engine.inputNode.removeTap(onBus: 0)
+        tapInstalled = false
         engine.stop()
         // If the new format isn't ready yet (0 Hz) this throws; we keep `isRunning` true
         // and let the controller's liveness watchdog (AUD-28) retry / fall back.
@@ -92,8 +102,14 @@ final class MicCapture: @unchecked Sendable {
     }
 
     func stop() {
-        guard isRunning else { return }
+        // G-1 審查發現:guard 曾經只看 `isRunning`,但 `start()` 中途失敗時
+        // (tap 已裝在 `buildAndStart()`,`engine.start()` 才拋錯)`isRunning`
+        // 還沒被設成 true,導致這裡整段清理被跳過 → tap 永久洩漏——跟 BUG-22
+        // 修復前的 `SystemAudioCapture` 一模一樣的縫。改用 `tapInstalled` 是否
+        // 真的裝了判斷,不管 `isRunning` 有沒有真的翻過。
+        guard isRunning || tapInstalled else { return }
         isRunning = false
+        tapInstalled = false
         if let configObserver {
             NotificationCenter.default.removeObserver(configObserver)
             self.configObserver = nil

@@ -19,9 +19,9 @@ public enum TranscriptionEngine: String, CaseIterable, Identifiable, Sendable {
     public var id: String { rawValue }
     public var label: String {
         switch self {
-        case .appleNative: return "macOS 原生(繁中·本機)"
-        case .whisperKit:  return "WhisperKit"
-        case .cloud:       return "自帶 API"
+        case .appleNative: return "macOS 原生(即時·本機)"
+        case .whisperKit:  return "Whisper(高精度·本機)"
+        case .cloud:       return "雲端(自帶 API)"
         }
     }
 }

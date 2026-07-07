@@ -40,6 +40,24 @@ STAMP="$(date +%m%d-%H%M) ${GIT_HASH}${DIRTY}"
 /usr/libexec/PlistBuddy -c "Add :MPBuildStamp string $STAMP" "$APP/Contents/Info.plist"
 echo "▶ build stamp: $STAMP"
 
+# --- Whisper 引擎(TR-14/16/17):嵌入動態框架 + OpenCC 字典 bundle -----------
+# whisper.framework 由 scripts/fetch-whisper.sh 產出(不進 git);缺了就跳過
+# (app 仍可跑,Whisper 引擎會回退 Apple 原生並提示)。
+if [ -d "Frameworks/whisper.xcframework/macos-arm64_x86_64/whisper.framework" ]; then
+  mkdir -p "$APP/Contents/Frameworks"
+  cp -R "Frameworks/whisper.xcframework/macos-arm64_x86_64/whisper.framework" "$APP/Contents/Frameworks/"
+  install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/MyParrot" 2>/dev/null || true
+  echo "▶ embedded whisper.framework"
+else
+  echo "⚠️ Frameworks/whisper.xcframework 不存在 — 先跑 scripts/fetch-whisper.sh,否則 Whisper 引擎不可用"
+fi
+OPENCC_BUNDLE="$(dirname "$BIN")/SwiftyOpenCC_OpenCC.bundle"
+if [ -d "$OPENCC_BUNDLE" ]; then
+  cp -R "$OPENCC_BUNDLE" "$APP/Contents/Resources/"
+  chmod -R u+w "$APP/Contents/Resources/SwiftyOpenCC_OpenCC.bundle"  # SPM checkout 唯讀,不加會卡 xattr/簽章
+  echo "▶ embedded OpenCC dictionaries"
+fi
+
 # --- Pick a signing identity -------------------------------------------------
 # TCC (permission memory) anchors grants to the signing identity. A real
 # Apple-issued cert has a Team ID, so its Designated Requirement is stable across
@@ -75,7 +93,13 @@ fi
 # clean window (strip → sign immediately).
 signed=0
 for attempt in 1 2 3 4 5; do
-  xattr -cr "$APP" 2>/dev/null
+  xattr -cr "$APP" 2>/dev/null || true   # best-effort;set -e 下不可讓它殺腳本
+  # 內層先簽:嵌入的 framework 必須在外層 app 簽章前完成(nested code rule)。
+  # (if 寫法防 set -e:框架簽失敗只警告,交由外層簽章的重試機制處理)
+  if [ -d "$APP/Contents/Frameworks/whisper.framework" ]; then
+    codesign --force --sign "$SIGN_ID" "$APP/Contents/Frameworks/whisper.framework" \
+      || echo "⚠️ whisper.framework 簽章失敗(attempt $attempt)"
+  fi
   if codesign --force --sign "$SIGN_ID" --entitlements Resources/MyParrot.entitlements "$APP" 2>/dev/null; then
     signed=1; break
   fi

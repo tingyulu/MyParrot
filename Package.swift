@@ -6,9 +6,23 @@ let package = Package(
     platforms: [
         .macOS(.v15)
     ],
+    dependencies: [
+        // OpenCC 簡→繁(台灣正體+慣用詞),whisper 中文輸出常是簡體(TR-17)。
+        .package(url: "https://github.com/ddddxxx/SwiftyOpenCC.git", branch: "master")
+    ],
     targets: [
+        // whisper.cpp 推理引擎(Metal+CoreML),由 scripts/fetch-whisper.sh 產出。
+        // 二進位不進 git(35MB);clone 後先跑該腳本再 build。
+        .binaryTarget(
+            name: "whisper",
+            path: "Frameworks/whisper.xcframework"
+        ),
         .target(
             name: "MyParrotCore",
+            dependencies: [
+                "whisper",
+                .product(name: "OpenCC", package: "SwiftyOpenCC")
+            ],
             path: "Sources/MyParrotCore"
         ),
         .executableTarget(

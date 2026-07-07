@@ -150,7 +150,13 @@ final class SystemAudioCapture {
     }
 
     func stop() {
-        guard isRunning else { return }
+        // BUG-22 審查發現:guard 曾經是 `isRunning`,但 `start()` 中途失敗時
+        // (tap/aggregate 已建立、`AudioDeviceStart` 或更後面才拋錯)`isRunning`
+        // 還沒被設成 true,導致這裡整段清理被跳過 → tap/aggregate 永久洩漏。
+        // 自動重建(rebuildSystemCapture)一旦重試中反覆撞到這個縫,每次失敗都
+        // 會洩漏一組真的 CoreAudio process tap + aggregate device。改用
+        // tapID/aggregateID 是否有效判斷,不管 isRunning 有沒有真的翻過。
+        guard isRunning || tapID.isValid || aggregateID.isValid else { return }
         isRunning = false
         rateWindowStart = 0; rateFrames = 0
         inputStreamID = .unknown

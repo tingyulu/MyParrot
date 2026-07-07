@@ -7,6 +7,12 @@ struct SettingsView: View {
     @Bindable private var loc = Localizer.shared
     @Environment(\.dismiss) private var dismiss
 
+    // Whisper 模型管理(TR-16)
+    @State private var modelProgress: [String: Double] = [:]
+    @State private var modelError: String?
+    @State private var installedIDs: Set<String> = []
+    @State private var activeModelID: String?
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
@@ -76,6 +82,12 @@ struct SettingsView: View {
                     Picker(L("引擎"), selection: $controller.engine) {
                         ForEach(TranscriptionEngine.allCases) { e in Text(e.label).tag(e) }
                     }
+                    if controller.engine == .whisperKit { whisperModelRows }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Toggle(L("結束後自動產出高精度逐字稿"), isOn: $controller.autoTranscribeAfterStop)
+                        Text(L("錄音停止後用 Whisper 高精度重轉一次;即時稿僅供會中參考。"))
+                            .font(.system(size: 11)).foregroundStyle(.tertiary)
+                    }
                 } header: { Text(L("逐字稿")) }
 
                 Section {
@@ -100,6 +112,78 @@ struct SettingsView: View {
         .frame(width: 480, height: 640)
         .onAppear { controller.startMicMonitor() }
         .onDisappear { controller.stopMicMonitor() }
+    }
+
+    // MARK: - Whisper 模型管理(TR-16)
+
+    private var whisperModelRows: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(L("Whisper 模型")).font(.system(size: 12, weight: .medium))
+            ForEach(WhisperModel.knownModels) { m in
+                HStack(spacing: 8) {
+                    Text(m.display).font(.system(size: 11))
+                    Spacer()
+                    if let p = modelProgress[m.id] {
+                        ProgressView(value: p).frame(width: 80)
+                        Text("\(Int(p * 100))%").font(.system(size: 11)).monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    } else if installedIDs.contains(m.id) {
+                        if activeModelID == m.id {
+                            Text(L("使用中")).font(.system(size: 11)).foregroundStyle(.green)
+                        } else {
+                            Button(L("使用")) { setActiveModel(m) }.controlSize(.small)
+                        }
+                        Button(L("刪除")) {
+                            WhisperModelStore.delete(m)
+                            refreshModels()
+                            controller.reloadTranscriptionEngine()
+                        }.controlSize(.small)
+                    } else if m.downloadURL != nil {
+                        Button(L("下載")) { downloadModel(m) }.controlSize(.small)
+                    }
+                }
+            }
+            if let e = modelError {
+                Text(e).font(.system(size: 11)).foregroundStyle(.red)
+            }
+        }
+        .onAppear { refreshModels() }
+    }
+
+    private func refreshModels() {
+        let inst = WhisperModelStore.installed()
+        installedIDs = Set(inst.map(\.model.id))
+        let pref = UserDefaults.standard.string(forKey: "whisperModel")
+        activeModelID = inst.first(where: { $0.model.id == pref })?.model.id
+            ?? inst.first(where: { $0.model.id == "large-v3-turbo" })?.model.id
+            ?? inst.first?.model.id
+    }
+
+    private func setActiveModel(_ m: WhisperModel) {
+        UserDefaults.standard.set(m.id, forKey: "whisperModel")
+        controller.reloadTranscriptionEngine()
+        refreshModels()
+    }
+
+    private func downloadModel(_ m: WhisperModel) {
+        modelProgress[m.id] = 0
+        modelError = nil
+        Task {
+            do {
+                _ = try await WhisperModelStore.download(m) { p in
+                    Task { @MainActor in modelProgress[m.id] = p }
+                }
+                modelProgress[m.id] = nil
+                if UserDefaults.standard.string(forKey: "whisperModel") == nil {
+                    UserDefaults.standard.set(m.id, forKey: "whisperModel")
+                }
+                controller.reloadTranscriptionEngine()
+                refreshModels()
+            } catch {
+                modelProgress[m.id] = nil
+                modelError = "\(L("下載失敗")):\(error)"
+            }
+        }
     }
 
     private func chooseDir() {

@@ -3,3 +3,4 @@
 *.app
 .DS_Store
 *.xcodeproj
+Frameworks/

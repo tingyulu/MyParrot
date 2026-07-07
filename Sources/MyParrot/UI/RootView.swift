@@ -213,14 +213,10 @@ struct RootView: View {
         }
     }
 
-    // "最近 3 分鐘" filters to the last 3 minutes of bubbles; "完整" shows all.
-    // Only applies during live recording — a transcribed file always shows in full
-    // (otherwise its older timestamps get filtered out and it looks like nothing happened).
+    // 「最近 3 分鐘」錨定最後一行時間(非牆鐘)→ 錄音中/結束後/舊檔轉稿語意
+    // 一致,不再有 state gate(BUG-20:結束後 gate 讓切換形同虛設)。
     private var visibleTranscript: [TranscriptLine] {
-        let all = controller.liveTranscript
-        guard !fullTranscript, controller.state == .recording, let last = all.last?.time else { return all }
-        let cutoff = last.addingTimeInterval(-180)
-        return all.filter { $0.time >= cutoff }
+        TranscriptWindow.visible(controller.liveTranscript, full: fullTranscript)
     }
 
     // UI-19: 廣告欄位現階段放大叔的 LinkedIn(Eric 2026-07-02 指定);
@@ -328,9 +324,6 @@ struct RecordingRow: View {
             Button { controller.transcribe(rec) } label: { Image(systemName: "doc.text") }
                 .buttonStyle(.plain).foregroundStyle(rec.hasTranscript ? Color.green : .primary)
                 .help(L("轉逐字稿"))
-            Button { controller.saveToDrive(rec) } label: { Image(systemName: "arrow.up.doc") }
-                .buttonStyle(.plain).foregroundStyle(rec.savedToDrive ? Color.green : .primary)
-                .help(L("存 Google Drive"))
         }
         .padding(8)
         .background(RoundedRectangle(cornerRadius: 8).fill(isPlaying ? MP.blue.opacity(0.08) : Color.primary.opacity(0.03)))
@@ -355,7 +348,6 @@ struct ControlBar: View {
             case .finished:
                 if let last = controller.recordings.first {
                     plainButton("轉逐字稿", "doc.text") { controller.transcribe(last) }
-                    plainButton("存 Drive", "arrow.up.doc") { controller.saveToDrive(last) }
                 }
                 plainButton("新錄音", "plus") { controller.newRecording() }
             }

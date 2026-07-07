@@ -16,8 +16,9 @@
 
 - **The other side** — Core Audio **Process Tap** (macOS 14.4+): captures system audio with no driver, no kernel extension, no virtual audio device
 - **You** — AVAudioEngine microphone capture that **survives device/route changes mid-recording** (auto-heal on configuration change + a liveness watchdog; hot-swap mics without stopping — the file stays continuous)
-- **Live transcript** while recording — macOS 26 SpeechAnalyzer (long-form streaming), automatic fallback to SFSpeechRecognizer on older systems
-- **Transcribe past recordings** → `.txt` + timestamped, speaker-prefixed `.srt`
+- **Live transcript** while recording — three swappable engines: macOS 26 **SpeechAnalyzer** (long-form streaming, automatic fallback to SFSpeechRecognizer on older systems), or a fully local **Whisper** engine (whisper.cpp + Metal, large-v3 family) for stronger mixed-language (Mandarin/English) accuracy — recording auto-upgrades to a higher-precision re-transcribe once you stop
+- Whisper models download in-app (Settings) or drop a `ggml-*.bin` into Application Support yourself — nothing is bundled, nothing calls home unless you ask it to
+- **Transcribe past recordings** → `.txt` + timestamped, speaker-prefixed `.srt`, with automatic simplified→traditional Chinese normalization on Whisper output
 - **Offline echo cancellation** (optional, non-destructive — writes `*_aec.m4a`, never touches the original)
 - Auto CAF→m4a conversion, quit-protection while recording, floating mini mode, input-gain with soft limiter
 - UI in English / 繁體中文 / 简体中文 / 日本語 / 한국어
@@ -27,13 +28,15 @@
 
 - **macOS 14.4+** (system-audio Process Tap API) — **macOS 26.1+ recommended** for live transcription (26.0 has a known process-tap regression)
 - **Swift 6 toolchain** — Xcode **Command Line Tools are enough** to build, run, and self-test. Full Xcode is only needed for `swift test`.
+- **cmake** (`brew install cmake`) — one-time only, to build the local Whisper engine from source (see Quick start)
 
 ## Quick start
 
 ```bash
 git clone <this-repo> && cd MyParrot
-swift build                 # compile check
-bash scripts/build-app.sh   # assemble, sign, install to ~/Applications
+bash scripts/fetch-whisper.sh   # one-time: builds the local Whisper engine from source (~5-10 min, needs Xcode + cmake)
+swift build                     # compile check
+bash scripts/build-app.sh       # assemble, sign, install to ~/Applications
 open ~/Applications/MyParrot.app
 ```
 
@@ -44,6 +47,7 @@ First launch asks for **Microphone**, **Speech Recognition**, and **System Audio
 1. **Signing & permission persistence.** macOS ties permission grants (TCC) to the signing identity. `build-app.sh` auto-picks the best available: an Apple Development / Developer ID certificate (has a Team ID → **permissions survive rebuilds**) → a self-signed cert → ad-hoc (**permissions re-asked on every rebuild**). If you have any Apple certificate, the script will find and use it.
 2. **Keep the `.app` out of iCloud-synced folders.** iCloud Drive re-applies Finder xattrs that repeatedly break code signatures. This is why the script installs to `~/Applications`.
 3. **Don't use a Bluetooth mic.** The moment any app opens a Bluetooth microphone, the whole link drops from A2DP to narrowband HFP — the *other side's* audio degrades to phone quality too. Wear the headset for listening; speak into the built-in or a wired/USB mic. (MyParrot's auto-selection already avoids Bluetooth mics; picking one manually is allowed but warned.)
+4. **First `swift build` fails right after clone?** Run `bash scripts/fetch-whisper.sh` first. The Whisper engine binary (~35MB) isn't checked into git — the script builds it from source once (needs Xcode + `cmake`).
 
 ## Known limitations
 
@@ -69,7 +73,8 @@ Sources/MyParrotCore/        Library: capture, mux, transcription, export
   AudioUtils.swift           SampleQueue (ramped padding), 48 kHz mono converter, RMS
   RecordingController.swift  State machine, device watchdog, conversion, playback
   EchoCleanup / EchoCanceller / DelayEstimator   Offline AEC (bulk-delay + NLMS)
-  Transcription/             SpeechAnalyzer (live + file) with SFSpeech fallback
+  Transcription/             SpeechAnalyzer (live + file) + SFSpeech fallback,
+                              local Whisper engine (whisper.cpp/Metal) + model manager
   SelfTest.swift             12 self-test cases (shared by CLI runner & swift test)
 Sources/MyParrot/            SwiftUI app (main window, mini mode, settings, mascot)
 Sources/MyParrotSelfTest/    CLI test runner — works with Command Line Tools only

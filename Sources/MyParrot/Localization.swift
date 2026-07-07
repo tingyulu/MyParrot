@@ -78,8 +78,6 @@ final class Localizer {
         "錄音中收音": [.en: "Capturing (recording)", .ja: "録音中・受信中", .ko: "녹음 중 수신", .zhCN: "录音中收音"],
         "等待訊號": [.en: "No signal", .ja: "信号なし", .ko: "신호 없음", .zhCN: "等待信号"],
         "轉逐字稿": [.en: "Transcribe", .ja: "文字起こし", .ko: "받아쓰기", .zhCN: "转写"],
-        "存 Drive": [.en: "Save to Drive", .ja: "Driveに保存", .ko: "Drive에 저장", .zhCN: "存到 Drive"],
-        "存 Google Drive": [.en: "Save to Google Drive", .ja: "Google Driveに保存", .ko: "Google Drive에 저장", .zhCN: "存到 Google Drive"],
         "即時逐字稿": [.en: "Live Transcript", .ja: "リアルタイム文字起こし", .ko: "실시간 받아쓰기", .zhCN: "实时字幕"],
         "最近 3 分鐘": [.en: "Last 3 min", .ja: "直近3分", .ko: "최근 3분", .zhCN: "最近 3 分钟"],
         "完整": [.en: "Full", .ja: "全文", .ko: "전체", .zhCN: "完整"],
@@ -159,6 +157,23 @@ final class Localizer {
             .zhCN: "要先结束并保存这段录音,还是继续录音?"],
         "繼續錄音": [.en: "Keep Recording", .ja: "録音を続ける", .ko: "계속 녹음", .zhCN: "继续录音"],
         "結束錄音並離開": [.en: "Stop & Quit", .ja: "終了して保存・終了", .ko: "끝내고 종료", .zhCN: "结束录音并退出"],
+        // 逐字稿引擎(TR-14/16/19)
+        "Whisper 模型": [.en: "Whisper model", .ja: "Whisper モデル", .ko: "Whisper 모델", .zhCN: "Whisper 模型"],
+        "下載": [.en: "Download", .ja: "ダウンロード", .ko: "다운로드", .zhCN: "下载"],
+        "刪除": [.en: "Delete", .ja: "削除", .ko: "삭제", .zhCN: "删除"],
+        "使用": [.en: "Use", .ja: "使用", .ko: "사용", .zhCN: "使用"],
+        "使用中": [.en: "In use", .ja: "使用中", .ko: "사용 중", .zhCN: "使用中"],
+        "下載失敗": [.en: "Download failed", .ja: "ダウンロード失敗", .ko: "다운로드 실패", .zhCN: "下载失败"],
+        "結束後自動產出高精度逐字稿": [
+            .en: "Auto high-accuracy transcript after stop",
+            .ja: "停止後に高精度文字起こしを自動生成",
+            .ko: "정지 후 고정밀 전사 자동 생성",
+            .zhCN: "结束后自动产出高精度逐字稿"],
+        "錄音停止後用 Whisper 高精度重轉一次;即時稿僅供會中參考。": [
+            .en: "Re-transcribes with Whisper after the recording stops; the live transcript is a meeting-time reference.",
+            .ja: "録音停止後に Whisper で高精度に再文字起こしします。ライブ字幕は会議中の参考用です。",
+            .ko: "녹음 정지 후 Whisper로 고정밀 재전사합니다. 실시간 자막은 참고용입니다.",
+            .zhCN: "录音停止后用 Whisper 高精度重转一次;实时稿仅供会中参考。"],
     ]
 }
 
