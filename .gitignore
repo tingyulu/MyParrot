@@ -1,6 +1,7 @@
 .build/
 .swiftpm/
-*.app
-.DS_Store
+MyParrot.app/
 *.xcodeproj
+.DS_Store
 Frameworks/
+*.zip

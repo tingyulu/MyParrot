@@ -110,11 +110,25 @@ public final class RecordingController {
     private static let sysDeadAfter: TimeInterval = 5        // aggregate/tap 重建較慢,門檻比麥克風寬鬆些
     private static let sysRebuildCooldown: TimeInterval = 2
     private static let sysMaxConsecutiveRebuilds = 3
+    /// BUG-24:AUD-32 的看門狗只看「buffer 有沒有停止流動」,但藍牙 HFP/SCO(電話
+    /// 模式)路由下 Process Tap 會**持續送出全零 buffer**——IOProc 沒停、`onLevel`
+    /// 照樣以 level≈0 觸發,所以 `lastSysLevelAt` 一直被刷新、看門狗全盲。實例:
+    /// 2026-07-09 一場真實面談,對方軌開頭 1 分鐘有聲、第 3 分鐘起整整 31 分鐘數位零。
+    /// 故另記「最後一次真的收到訊號」的時間,看門狗與死聲道警告都改判這個(而非
+    /// buffer 到達)。搭配去單調的 `sysPeak`(見 8s 警告)才能偵測「中途才死」。
+    private var lastSysSignalAt = Date()
+    private static let sysSilentWarnAfter: TimeInterval = 12   // 持續無「訊號」這麼久 → 死聲道警告(可重新武裝)
+    private static let sysSilentRebuildAfter: TimeInterval = 20 // 更久的真靜音才嘗試重建(避免自然對話停頓誤觸;HFP 重建救不回,警告才是主力)
 
     /// True once that channel has actually picked up sound this recording — the
-    /// live "yes, your voice is being captured" confirmation during a meeting.
+    /// live "yes, this side is being captured" confirmation dot in the UI.
     public var micHasSignal: Bool { micPeak > Self.silenceThreshold }
-    public var sysHasSignal: Bool { sysPeak > Self.silenceThreshold }
+    /// BUG-24:對方軌的健康指示燈**不能只看整場單調 `sysPeak`**——BUG-24 情境下開頭
+    /// 那 1 分鐘的聲音會把 `sysPeak` 頂過門檻、之後整場全零卻仍顯示綠燈「收音中」,
+    /// 跟同時武裝的死聲道警告自相矛盾(使用者看綠燈以為沒事)。所以一旦看門狗判定
+    /// 對方軌持續無聲(`silentSysWarned`)就把燈熄掉;下次收到真訊號會 re-arm(見
+    /// `system.onLevel`),燈再亮。
+    public var sysHasSignal: Bool { sysPeak > Self.silenceThreshold && !silentSysWarned }
 
     public private(set) var recordingsDir: URL
 
@@ -351,8 +365,16 @@ public final class RecordingController {
         system.stop()
         do {
             try system.start()
-            lastSysLevelAt = Date()
-            deviceChangeWarning = "偵測到系統音訊擷取中斷(\(reason)),已自動重新啟動"
+            // Give the rebuilt tap a fresh grace window before it can be judged
+            // stale/silent again, so the bounded retries are spaced ~sysSilentRebuildAfter
+            // apart (a fair recovery chance) instead of firing back-to-back (BUG-24).
+            lastSysLevelAt = Date(); lastSysSignalAt = Date()
+            // BUG-24:別用「已自動重新啟動」的成功語氣蓋掉稍早那句可行動的 HFP 提示。
+            // 若這次重建是因「持續無聲」(silentSysWarned 已武裝),重建對 HFP 路由救不回
+            // 聲音,誆稱「已重啟」會變成停到錄音結束的假安心;改成不宣稱成功的合併訊息。
+            deviceChangeWarning = silentSysWarned
+                ? "已嘗試自動重建對方軌,但可能仍收不到 — 若用藍牙耳機當輸出會走 HFP/電話模式而擷取不到,請改用內建喇叭或有線輸出"
+                : "偵測到系統音訊擷取中斷(\(reason)),已自動重新啟動"
         } catch {
             lastError = "系統音訊自動重建失敗(\(reason)):\(error)"
         }
@@ -462,7 +484,7 @@ public final class RecordingController {
         lastError = nil
         micPeak = 0; sysPeak = 0; silentMicWarned = false; silentSysWarned = false
         lastMicLevelAt = Date(); micAutoRebuildCount = 0; lastMicRebuildAt = .distantPast
-        lastSysLevelAt = Date(); sysAutoRebuildCount = 0; lastSysRebuildAt = .distantPast
+        lastSysLevelAt = Date(); lastSysSignalAt = Date(); sysAutoRebuildCount = 0; lastSysRebuildAt = .distantPast
         mic.gain = inputGain
 
         // Capture plain references/values so the audio-thread callbacks never touch
@@ -473,8 +495,16 @@ public final class RecordingController {
         system.onLevel = { [weak self] v in Task { @MainActor in
             guard let self else { return }
             self.otherLevel = v; self.sysPeak = max(self.sysPeak, v)
-            // Buffers are flowing → the tap is alive (BUG-22 watchdog, mirrors mic below).
-            self.lastSysLevelAt = Date(); self.sysAutoRebuildCount = 0 } }
+            // A buffer arrived → the *tap* is alive. But under Bluetooth HFP routing the
+            // tap keeps delivering all-zero buffers, so buffer-arrival alone does NOT mean
+            // 對方 audio is being captured (BUG-24). Track buffer-flow for the "device
+            // removed → buffers stop" watchdog, but track actual SIGNAL separately.
+            self.lastSysLevelAt = Date()
+            if v >= Self.silenceThreshold {
+                self.lastSysSignalAt = Date()
+                self.sysAutoRebuildCount = 0   // reset the cap on real signal, not on silent buffers
+                self.silentSysWarned = false   // re-arm: if it dies again later, warn again
+            } } }
         mic.onLevel = { [weak self] v in Task { @MainActor in
             guard let self else { return }
             self.youLevel = v; self.micPeak = max(self.micPeak, v)
@@ -663,15 +693,24 @@ public final class RecordingController {
                     self.lastMicRebuildAt = now
                     self.rebuildCurrentMic(reason: "你軌訊號中斷")
                 }
-                // BUG-22:對方(系統音訊)tap 同一套看門狗——buffer 停止流動(死於
-                // 開錄瞬間 system.start() 拋錯被靜默吞掉,或錄音中途 tap/aggregate
-                // 失效)都靠這裡統一補救,不必先查清楚是哪一種。
-                if now.timeIntervalSince(self.lastSysLevelAt) > Self.sysDeadAfter,
-                   self.sysAutoRebuildCount < Self.sysMaxConsecutiveRebuilds,
-                   now.timeIntervalSince(self.lastSysRebuildAt) > Self.sysRebuildCooldown {
+                // BUG-22/BUG-24:對方(系統音訊)tap 看門狗。兩種死法都補救:
+                //   ① buffer 停止流動(裝置移除、開錄瞬間 system.start() 靜默拋錯)
+                //   ② buffer 仍在流但持續全零(BUG-24:藍牙 HFP 路由,tap 送數位零)
+                // ①用 buffer 新鮮度、②用「訊號」新鮮度。②門檻較寬(20s)避免自然
+                // 對話停頓誤觸;HFP 情境重建救不回聲音(下方警告才是主力),但對「裝置
+                // glitch 送零」這種非 HFP 的死法,上限內重建仍可能救活。
+                let sysBufferStaleFor = now.timeIntervalSince(self.lastSysLevelAt)
+                let sysSilentFor = now.timeIntervalSince(self.lastSysSignalAt)
+                if SysTrackWatchdog.shouldRebuild(
+                        bufferStaleFor: sysBufferStaleFor, silentFor: sysSilentFor,
+                        rebuildCount: self.sysAutoRebuildCount,
+                        sinceLastRebuild: now.timeIntervalSince(self.lastSysRebuildAt),
+                        deadAfter: Self.sysDeadAfter, silentAfter: Self.sysSilentRebuildAfter,
+                        cooldown: Self.sysRebuildCooldown, maxRebuilds: Self.sysMaxConsecutiveRebuilds) {
                     self.sysAutoRebuildCount += 1
                     self.lastSysRebuildAt = now
-                    self.rebuildSystemCapture(reason: "對方軌訊號中斷")
+                    self.rebuildSystemCapture(reason: sysBufferStaleFor > Self.sysDeadAfter
+                        ? "對方軌訊號中斷" : "對方軌持續無聲")
                 }
                 // After 8s, if your mic still hasn't picked up anything, warn — your
                 // voice channel is dead (usually the wrong input device is selected).
@@ -681,11 +720,15 @@ public final class RecordingController {
                         ? "⚠️ 你選的是藍牙麥克風,整場可能收不到聲音(常被會議 app 佔住或掉窄頻)— 請到設定改用內建或 USB 麥克風"
                         : "你的麥克風似乎沒收到聲音 — 請到設定確認「你的麥克風」選對裝置"
                 }
-                // 對方軌對稱的 8s 死聲道警告(BUG-22 前這裡完全沒有——22 分鐘會議
-                // 錄完才發現對方軌是空的,現在 8 秒就能看到警示)。
-                if self.elapsed > 8, self.sysPeak < Self.silenceThreshold, !self.silentSysWarned {
+                // 對方軌死聲道警告。BUG-24 前這裡用整場單調的 `sysPeak`,開頭只要有
+                // 一瞬間收到聲就永久壓過門檻、「中途才死」偵測不到(BUG-24 實例:開頭 1 分鐘
+                // 有聲、之後 31 分鐘全零卻整場無警告)。改看「距最後一次真訊號多久」,
+                // 中途死也能觸發,且 onLevel 收到訊號會 re-arm `silentSysWarned`。
+                if SysTrackWatchdog.shouldWarnSilent(
+                        elapsed: self.elapsed, silentFor: sysSilentFor,
+                        alreadyWarned: self.silentSysWarned, warnAfter: Self.sysSilentWarnAfter) {
                     self.silentSysWarned = true
-                    self.deviceChangeWarning = "對方(系統音訊)似乎沒收到聲音 — 請確認會議/通話音訊有在這台 Mac 上播放"
+                    self.deviceChangeWarning = "⚠️ 對方(系統音訊)沒收到聲音 — 若用藍牙耳機當輸出,通話會走 HFP/電話模式而擷取不到對方,請改用內建喇叭或有線輸出;並確認會議音訊在這台 Mac 上播放"
                 }
             }
         }
@@ -786,5 +829,29 @@ public final class RecordingController {
                 self.rebuildSystemCapture(reason: "系統輸出裝置變更")
             }
         }
+    }
+}
+
+/// BUG-24:對方(系統音訊)軌看門狗的**純決策邏輯**,抽出來讓 SelfTest 不必起真
+/// timer/tap 就能驗(對照 BUG-24 前只看 buffer 到達、被藍牙 HFP「流動但全零」打穿
+/// 的舊行為)。所有輸入都是「距某事件多久」的秒數,無副作用、與 @MainActor 狀態無關。
+enum SysTrackWatchdog {
+    /// 是否該跳對方軌「死聲道」警告:錄音已過起步期(>8s)、距最後一次**真訊號**
+    /// 已超過門檻、且尚未警告過(警告 latch 在收到訊號時 re-arm)。用「距訊號多久」
+    /// 而非整場單調 peak,才能偵測「開頭有聲、中途才死」(BUG-24 的實例)。
+    static func shouldWarnSilent(elapsed: TimeInterval, silentFor: TimeInterval,
+                                 alreadyWarned: Bool, warnAfter: TimeInterval) -> Bool {
+        elapsed > 8 && silentFor >= warnAfter && !alreadyWarned
+    }
+
+    /// 是否該嘗試自動重建對方軌 tap:buffer 停止流動(裝置移除)**或**持續真靜音
+    /// 太久(死/HFP tap 送全零),且未達連續重建上限、距上次重建已過冷卻。
+    static func shouldRebuild(bufferStaleFor: TimeInterval, silentFor: TimeInterval,
+                             rebuildCount: Int, sinceLastRebuild: TimeInterval,
+                             deadAfter: TimeInterval, silentAfter: TimeInterval,
+                             cooldown: TimeInterval, maxRebuilds: Int) -> Bool {
+        (bufferStaleFor > deadAfter || silentFor >= silentAfter)
+            && rebuildCount < maxRebuilds
+            && sinceLastRebuild > cooldown
     }
 }

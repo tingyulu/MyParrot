@@ -31,6 +31,34 @@ final class SystemAudioCapture {
     /// (the IOProc runs there, and `applyRate` is only called from the IOProc/start).
     private var tapFormat: AVAudioFormat?
 
+    /// BUG-25 gap-fill state (read/written only on `queue`, inside the IOProc).
+    /// Device-clock sample time where the NEXT callback should start; <0 = unseeded.
+    private var nextExpectedSampleTime: Double = -1
+    /// Total frames of silence inserted this run — surfaced for diagnostics/tests.
+    private(set) var gapFramesFilled = 0
+
+    /// Missing-frame count between callbacks, per the device clock. Ignores sub-32
+    /// jitter (timestamp rounding), refuses >2 s (device switch / rebuild — the sample
+    /// timeline is no longer continuous; resync instead of flooding silence), and
+    /// refuses negative/unseeded (first callback, or clock restart).
+    static func gapFrames(expected: Double, now: Double,
+                          minGap: Int = 32, maxGap: Int = 96_000) -> Int {
+        guard expected >= 0 else { return 0 }
+        let gap = Int((now - expected).rounded())
+        guard gap > minGap, gap <= maxGap else { return 0 }
+        return gap
+    }
+
+    /// Zeroed PCM buffer in the tap's format (all channels), for gap filling.
+    static func silenceBuffer(format: AVAudioFormat, frames: Int) -> AVAudioPCMBuffer? {
+        guard frames > 0,
+              let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)),
+              let ch = buf.floatChannelData else { return nil }
+        buf.frameLength = AVAudioFrameCount(frames)
+        for c in 0..<Int(format.channelCount) { ch[c].update(repeating: 0, count: frames) }
+        return buf
+    }
+
     // Ground-truth rate measurement (runs on `queue` inside the IOProc).
     private var rateFrames = 0
     private var rateWindowStart: UInt64 = 0
@@ -88,10 +116,27 @@ final class SystemAudioCapture {
         queue.sync { applyRate(seedRate()) }
         guard tapFormat != nil else { throw "Failed to build AVAudioFormat from tap" }
 
-        let ioBlock: AudioDeviceIOBlock = { [weak self] _, inInputData, _, _, _ in
+        let ioBlock: AudioDeviceIOBlock = { [weak self] _, inInputData, inInputTime, _, _ in
             guard let self, let fmt = self.tapFormat else { return }
             guard let buffer = AVAudioPCMBuffer(pcmFormat: fmt, bufferListNoCopy: inInputData, deallocator: nil) else { return }
-            self.measureRate(frames: Int(buffer.frameLength))   // ground-truth rate correction
+            // BUG-25:藍牙輸出當時鐘主時,藍牙重傳/抖動會讓 IOProc 漏拍——漏掉的樣本
+            // 從未送達,左軌波形被「跳接」,一場 30 分鐘可累積數十萬個爆點(BUG-25 實例
+            // 4.95% 樣本)。缺口只在這裡看得到(裝置時鐘 mSampleTime vs 實際送達幀數),
+            // 到 StereoRecorder 已無從得知。補法:偵測到缺口就原地補等長靜音,時間軸
+            // 對齊、爆裂跳接變成可辨的短靜音。非藍牙裝置不漏拍 → 天生 no-op。
+            let ts = inInputTime.pointee
+            var frames = Int(buffer.frameLength)
+            if ts.mFlags.contains(.sampleTimeValid) {
+                let gap = Self.gapFrames(expected: self.nextExpectedSampleTime, now: ts.mSampleTime)
+                if gap > 0, let filler = Self.silenceBuffer(format: fmt, frames: gap) {
+                    self.gapFramesFilled += gap
+                    frames += gap                    // 缺口屬於裝置時間軸,計入測速才準
+                    self.onLevel?(0)
+                    self.onBuffer?(filler)
+                }
+                self.nextExpectedSampleTime = ts.mSampleTime + Double(buffer.frameLength)
+            }
+            self.measureRate(frames: frames)   // ground-truth rate correction
             self.onLevel?(buffer.rmsLevel)
             self.onBuffer?(buffer)
         }
@@ -159,6 +204,7 @@ final class SystemAudioCapture {
         guard isRunning || tapID.isValid || aggregateID.isValid else { return }
         isRunning = false
         rateWindowStart = 0; rateFrames = 0
+        nextExpectedSampleTime = -1; gapFramesFilled = 0   // BUG-25: sample timeline resets with the tap
         inputStreamID = .unknown
 
         if aggregateID.isValid {

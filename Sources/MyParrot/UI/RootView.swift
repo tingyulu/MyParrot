@@ -13,12 +13,18 @@ struct RootView: View {
     @State private var loc = Localizer.shared
     @State private var fullTranscript = false
     @State private var showSettings = false
+    /// UI-20: 最近錄音列表可收折省空間。@State(非 @AppStorage)=只在本次
+    /// 執行內記住,嚴守「不加沒要求的功能」;預設展開維持原行為。
+    @State private var listExpanded = true
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(alignment: .top, spacing: 14) {
-                leftColumn.frame(width: 290)
-                transcriptColumn.frame(maxWidth: .infinity)
+            // UI-20: 兩欄(左欄290|逐字稿)→單直欄,視窗可拉窄到 400。
+            // 順序=Eric 指定:控制區 → 即時逐字稿(彈性主體) → 可收折列表。
+            VStack(alignment: .leading, spacing: 12) {
+                controlSection
+                transcriptSection
+                recordingsSection
             }
             .padding(14)
             adBar
@@ -27,7 +33,8 @@ struct RootView: View {
             ParrotMascot(size: 58, isRecording: controller.state == .recording)
                 .offset(x: -8, y: 4).allowsHitTesting(false)
         }
-        .frame(minWidth: 720, minHeight: 480)
+        // UI-20: 最小尺寸統一由 MyParrotApp 的 frame 管(單一真相),這裡不再
+        // 自帶——雙重約束取大者曾讓本層的值被 App 層舊 720 蓋掉。
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button { miniMode = true } label: { Label(L("迷你模式"), systemImage: "pip") }
@@ -38,7 +45,8 @@ struct RootView: View {
         .task { await controller.requestPermissions() }
     }
 
-    private var leftColumn: some View {
+    /// 錄音控制區(單欄最上):狀態卡+警告/權限橫幅+控制列,內容原封不動。
+    private var controlSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             statusCard
             if let warn = controller.deviceChangeWarning {
@@ -57,11 +65,6 @@ struct RootView: View {
                 permissionNotice
             }
             ControlBar(controller: controller)
-            recordingsList
-            Spacer(minLength: 0)
-            Text(buildStamp)                             // UI-16:一眼確認測的是哪一版
-                .font(.system(size: 9, design: .monospaced))
-                .foregroundStyle(.tertiary)
         }
     }
 
@@ -75,6 +78,9 @@ struct RootView: View {
                 Text(MP.clock(controller.elapsed))
                     .font(.system(size: 20, weight: .medium, design: .monospaced))
             }
+            // UI-17/20: 單欄後「頂部右側」=這張卡,macOS 26 玻璃工具列(迷你/設定鈕)
+            // 浮在其上——首列留出右側淨空,義務自逐字稿標題列搬來。
+            .padding(.trailing, 76)
             LevelBar(label: L("對方"), value: controller.otherLevel, color: MP.coral,
                      recording: controller.state == .recording, hasSignal: controller.sysHasSignal)
             LevelBar(label: L("你"), value: controller.youLevel, color: MP.blue,
@@ -119,10 +125,18 @@ struct RootView: View {
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(MP.blue.opacity(0.4), lineWidth: 1))
     }
 
-    private var recordingsList: some View {
+    /// UI-20: 最近錄音(單欄最下),標題列可收折省空間。
+    private var recordingsSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text(L("最近錄音")).font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
+                Button { withAnimation(.easeOut(duration: 0.15)) { listExpanded.toggle() } } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 10, weight: .semibold))
+                            .rotationEffect(.degrees(listExpanded ? 90 : 0))
+                        Text(L("最近錄音")).font(.system(size: 12, weight: .medium))
+                    }.foregroundStyle(.secondary)
+                }.buttonStyle(.plain)
                 Spacer()
                 Button {
                     NSWorkspace.shared.activateFileViewerSelecting([controller.recordingsDir])
@@ -130,24 +144,24 @@ struct RootView: View {
                     Label(L("在 Finder 打開"), systemImage: "folder").font(.system(size: 11))
                 }.buttonStyle(.borderless)
             }
-            // UI-17: 列表固定展開 10 列會把視窗「最小內容高度」撐到 ~900px,
-            // windowResizability(.contentSize) 下縮視窗就跟其他元件打架 →
-            // 改成自己捲動、封頂高度,視窗縮放自由了,底部 build 標記也不再被切。
-            ScrollView {
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(controller.recordings.prefix(10)) { rec in
-                        RecordingRow(rec: rec, controller: controller)
-                    }
-                    if controller.recordings.isEmpty {
-                        Text(L("尚無錄音")).font(.system(size: 11)).foregroundStyle(.tertiary)
+            // UI-17: 列表自己捲動、封頂高度,視窗縮放自由(單欄後封頂 300→200 再省空間)。
+            if listExpanded {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(controller.recordings.prefix(10)) { rec in
+                            RecordingRow(rec: rec, controller: controller)
+                        }
+                        if controller.recordings.isEmpty {
+                            Text(L("尚無錄音")).font(.system(size: 11)).foregroundStyle(.tertiary)
+                        }
                     }
                 }
+                .frame(maxHeight: 200)
             }
-            .frame(maxHeight: 300)
         }
     }
 
-    private var transcriptColumn: some View {
+    private var transcriptSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(L("即時逐字稿")).font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
@@ -157,9 +171,7 @@ struct RootView: View {
                     Text(L("完整")).tag(true)
                 }.pickerStyle(.segmented).frame(width: 190).labelsHidden()
             }
-            // UI-17: macOS 26 的玻璃工具列(迷你模式/設定鈕)浮在內容右上,
-            // 不讓 picker 鑽到它底下。
-            .padding(.trailing, 76)
+            // UI-17/20: 玻璃工具列淨空已搬到 statusCard 首列(單欄後這裡不在頂部)。
             if let err = controller.lastError {
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
@@ -188,7 +200,7 @@ struct RootView: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading).padding(12)
                 }
-                .frame(minHeight: 360)
+                .frame(minHeight: 200, maxHeight: .infinity)   // UI-20: 單欄的彈性主體
                 // UI-17: 泡泡原本沒被裁切,捲動時會溢出圓角框(macOS 26 還會
                 // 透進工具列區)。
                 .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -227,7 +239,12 @@ struct RootView: View {
             Link("大叔的 LinkedIn — linkedin.com/in/uncleeric",
                  destination: URL(string: "https://www.linkedin.com/in/uncleeric")!)
                 .font(.system(size: 11))
+                .lineLimit(1).truncationMode(.tail)      // UI-20: 窄視窗時截斷連結文字,別擠爆底列
             Spacer()
+            Text(buildStamp)                             // UI-16:一眼確認測的是哪一版(UI-20 自左欄底移入)
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(.tertiary)
+                .layoutPriority(1)                       // UI-20: 窄視窗時 stamp 優先存活(測試認版本用)
         }
         .padding(.horizontal, 14).padding(.vertical, 8).padding(.trailing, 64)
         .overlay(Rectangle().fill(MP.line).frame(height: 1), alignment: .top)

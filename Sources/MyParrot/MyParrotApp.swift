@@ -17,8 +17,11 @@ struct MyParrotApp: App {
                     RootView(controller: controller, miniMode: $miniMode)
                 }
             }
-            .frame(minWidth: miniMode ? 300 : 720,
-                   minHeight: miniMode ? 60 : 480)
+            // UI-20: 視窗最小尺寸的**單一真相**(RootView 不再自帶 frame——雙重約束
+            // 取大者,曾讓 RootView 的 320 被這裡的舊 720 蓋掉而失效)。
+            // 320 = 逐字稿標題+190pt picker 的內容下限。
+            .frame(minWidth: miniMode ? 300 : 320,
+                   minHeight: miniMode ? 60 : 560)
             .onAppear { appDelegate.controller = controller }
         }
         .windowResizability(.contentSize)

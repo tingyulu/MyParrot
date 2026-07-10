@@ -28,4 +28,6 @@ struct SelfTestCases {
     @Test("Whisper 幻覺防呆(連續複讀≥3 次壓下)") func whisperHallucinationGate() { check(SelfTest.whisperHallucinationGate()) }
     @Test("回音消除(NLMS)合成驗證")    func echoCancel()       { check(SelfTest.echoCancel()) }
     @Test("AEC 無回音 gate(戴耳機略過)") func aecNoEchoGate()   { check(SelfTest.aecNoEchoGate()) }
+    @Test("BUG-24 對方軌流動但全零看門狗") func sysSilenceWatchdog() { check(SelfTest.sysSilenceWatchdog()) }
+    @Test("BUG-25 藍牙漏拍缺口補靜音") func btGapFill() { check(SelfTest.btGapFill()) }
 }

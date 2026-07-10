@@ -27,7 +27,9 @@ public enum SelfTest {
             whisperChunkerAndZhTW(),
             whisperHallucinationGate(),
             echoCancel(),
-            aecNoEchoGate()
+            aecNoEchoGate(),
+            sysSilenceWatchdog(),
+            btGapFill()
         ]
     }
 
@@ -335,6 +337,55 @@ public enum SelfTest {
         let ok = peak < 0.10                                                             // 低於門檻 → gate 略過
         return Result(name: "AEC 無回音 gate(戴耳機略過)", passed: ok,
                       detail: String(format: "左右軌相關 %.3f < 0.10 → 略過 AEC", peak))
+    }
+
+    /// BUG-24:對方軌看門狗改「訊號式」後,要能偵測「開頭有聲、中途才死」(BUG-24 實例的
+    /// 藍牙 HFP 情境:tap 一直送 buffer 但全零)。這裡驗純決策邏輯 `SysTrackWatchdog`:
+    /// ① 中途死(距訊號 12s)→ 跳警告;② 自然短停頓(2s)→ 不跳;③ 舊單調 peak 邏輯
+    /// 會漏掉的「開頭有聲後全零」→ 新邏輯抓得到;④ 重建上限(3 次)對「流動但全零」
+    /// 也真的成立(距 buffer 仍新鮮、但持續真靜音超過門檻仍會嘗試,達上限即停)。
+    static func sysSilenceWatchdog() -> Result {
+        let warnAfter: TimeInterval = 12, silentRebuild: TimeInterval = 20
+        // ① 中途死:錄了 200s、距最後訊號 13s、還沒警告 → 該警告
+        let midDeath = SysTrackWatchdog.shouldWarnSilent(elapsed: 200, silentFor: 13, alreadyWarned: false, warnAfter: warnAfter)
+        // ② 自然短停頓 2s → 不該警告
+        let shortPause = SysTrackWatchdog.shouldWarnSilent(elapsed: 200, silentFor: 2, alreadyWarned: false, warnAfter: warnAfter)
+        // ③ 已警告過就不重複洗版
+        let noRepeat = SysTrackWatchdog.shouldWarnSilent(elapsed: 200, silentFor: 60, alreadyWarned: true, warnAfter: warnAfter)
+        // ④ 重建:buffer 仍新鮮(1s,沒停流)但持續真靜音 25s → 仍應嘗試重建(BUG-24 關鍵:
+        //    舊邏輯只看 buffer 新鮮度會判「活著」而完全不重建)
+        let rebuildOnSilent = SysTrackWatchdog.shouldRebuild(bufferStaleFor: 1, silentFor: 25, rebuildCount: 0, sinceLastRebuild: 5, deadAfter: 5, silentAfter: silentRebuild, cooldown: 2, maxRebuilds: 3)
+        // ⑤ 達上限即停(rebuildCount=3)
+        let capHolds = !SysTrackWatchdog.shouldRebuild(bufferStaleFor: 1, silentFor: 25, rebuildCount: 3, sinceLastRebuild: 5, deadAfter: 5, silentAfter: silentRebuild, cooldown: 2, maxRebuilds: 3)
+        // ⑥ 冷卻中不重建(距上次重建僅 1s < 2s)
+        let cooldownHolds = !SysTrackWatchdog.shouldRebuild(bufferStaleFor: 1, silentFor: 25, rebuildCount: 0, sinceLastRebuild: 1, deadAfter: 5, silentAfter: silentRebuild, cooldown: 2, maxRebuilds: 3)
+        let ok = midDeath && !shortPause && !noRepeat && rebuildOnSilent && capHolds && cooldownHolds
+        return Result(name: "BUG-24 對方軌流動但全零看門狗", passed: ok,
+                      detail: "中途死警告=\(midDeath) 短停頓靜音=\(shortPause) 已警告不重複=\(noRepeat) 靜音重建=\(rebuildOnSilent) 上限=\(capHolds) 冷卻=\(cooldownHolds)")
+    }
+
+    /// BUG-25:藍牙輸出時鐘抖動讓 IOProc 漏拍,漏掉的樣本使左軌波形跳接=滿軌破音
+    /// (BUG-25 實例:對方軌爆點率 4.95% vs 你軌 0.93%)。驗缺口偵測純函式
+    /// `SystemAudioCapture.gapFrames`:①連續無縫→0 ②時間戳 rounding 級抖動(≤32)→0
+    /// ③真缺口→精確幀數 ④>2s 巨跳(裝置切換/重建,時間軸不連續)→0 不灌靜音
+    /// ⑤首拍未播種→0 ⑥時鐘倒退(重啟)→0;並驗 silenceBuffer 產出正確幀數的全零 buffer。
+    static func btGapFill() -> Result {
+        let contig  = SystemAudioCapture.gapFrames(expected: 48_000, now: 48_000) == 0
+        let jitter  = SystemAudioCapture.gapFrames(expected: 48_000, now: 48_020) == 0
+        let real    = SystemAudioCapture.gapFrames(expected: 48_000, now: 52_800) == 4_800
+        let huge    = SystemAudioCapture.gapFrames(expected: 48_000, now: 300_000) == 0
+        let unseed  = SystemAudioCapture.gapFrames(expected: -1, now: 48_000) == 0
+        let rewind  = SystemAudioCapture.gapFrames(expected: 48_000, now: 10_000) == 0
+        var silence = false
+        if let fmt = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2),
+           let buf = SystemAudioCapture.silenceBuffer(format: fmt, frames: 4_800),
+           let ch = buf.floatChannelData {
+            silence = buf.frameLength == 4_800
+                && (0..<4_800).allSatisfy { ch[0][$0] == 0 && ch[1][$0] == 0 }
+        }
+        let ok = contig && jitter && real && huge && unseed && rewind && silence
+        return Result(name: "BUG-25 藍牙漏拍缺口補靜音", passed: ok,
+                      detail: "無縫=\(contig) 抖動=\(jitter) 真缺口=\(real) 巨跳=\(huge) 未播種=\(unseed) 倒退=\(rewind) 靜音buffer=\(silence)")
     }
 
     // MARK: - Helpers
