@@ -8,13 +8,13 @@ struct MiniView: View {
     @Binding var miniMode: Bool
 
     var body: some View {
-        HStack(spacing: 9) {
+        HStack(spacing: MP.spS) {
             ParrotMascot(size: 22, isRecording: controller.state == .recording)
             Circle().fill(MP.recRed).frame(width: 8, height: 8)
                 .opacity(controller.state == .recording ? 1 : 0.25)
             Text(MP.clock(controller.elapsed))
-                .font(.system(size: 14, weight: .medium, design: .monospaced))
-            VStack(spacing: 4) {
+                .font(MPFont.body.weight(.medium).monospaced())
+            VStack(spacing: MP.spXS) {
                 miniMeter(controller.otherLevel, MP.coral,
                           live: controller.state == .recording, ok: controller.sysHasSignal)
                 miniMeter(controller.youLevel, MP.blue,
@@ -34,12 +34,12 @@ struct MiniView: View {
             iconBtn("plus") { controller.newRecording() }
             iconBtn("arrow.up.left.and.arrow.down.right") { miniMode = false }
         }
-        .padding(.horizontal, 11).padding(.vertical, 8)
+        .padding(.horizontal, MP.spM).padding(.vertical, MP.spS)
         .frame(minWidth: 300)
     }
 
     private func miniMeter(_ v: Float, _ c: Color, live: Bool = false, ok: Bool = false) -> some View {
-        HStack(spacing: 4) {
+        HStack(spacing: MP.spXS) {
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 3).fill(Color.secondary.opacity(0.15))
@@ -54,7 +54,7 @@ struct MiniView: View {
     }
 
     private func iconBtn(_ name: String, _ act: @escaping () -> Void) -> some View {
-        Button(action: act) { Image(systemName: name).font(.system(size: 15)) }
+        Button(action: act) { Image(systemName: name).font(MPFont.title) }
             .buttonStyle(.plain)
     }
 }

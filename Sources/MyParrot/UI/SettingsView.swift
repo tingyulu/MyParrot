@@ -2,6 +2,12 @@ import SwiftUI
 import AppKit
 import MyParrotCore
 
+/// UI-16:build-app.sh 簽章前把 MPBuildStamp(MMdd-HHmm git短hash[*])蓋進
+/// Info.plist;`swift run` 無 stamp → "build dev"。
+/// UI-22:自 RootView 的 adBar 移來——主畫面淨空,設定頁底部留個小字驗版本用。
+private let buildStamp =
+    (Bundle.main.infoDictionary?["MPBuildStamp"] as? String).map { "build \($0)" } ?? "build dev"
+
 struct SettingsView: View {
     @Bindable var controller: RecordingController
     @Bindable private var loc = Localizer.shared
@@ -16,10 +22,12 @@ struct SettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text(L("設定")).font(.system(size: 16, weight: .medium))
+                // UI-22: 手寫 16pt medium 換系統語意字型,跟下方 Form section header
+                // 是同一套渲染邏輯。
+                Text(L("設定")).font(.title3.weight(.semibold))
                 Spacer()
                 Button(L("完成")) { dismiss() }.keyboardShortcut(.defaultAction)
-            }.padding(16)
+            }.padding(MP.spL)
             Divider()
 
             Form {
@@ -40,17 +48,17 @@ struct SettingsView: View {
                     }
                     LabeledContent(L("聆聽輸出")) { Text(L("跟隨系統 · 不影響錄音")).foregroundStyle(.secondary) }
                 } header: { Text(L("輸入來源(分兩軌)")) }
-                footer: { Text(L("提醒:麥克風別選藍牙耳機,否則整條藍牙掉 HFP,對方聲音也會變糊。")).font(.system(size: 11)).foregroundStyle(.tertiary) }
+                footer: { Text(L("提醒:麥克風別選藍牙耳機,否則整條藍牙掉 HFP,對方聲音也會變糊。")).font(MPFont.caption).foregroundStyle(.tertiary).lineSpacing(3) }
 
                 Section {
-                    VStack(alignment: .leading, spacing: 6) {
+                    VStack(alignment: .leading, spacing: MP.spS) {
                         HStack {
                             Text(L("麥克風靈敏度"))
                             Spacer()
                             Text(String(format: "%.1f×", controller.inputGain)).foregroundStyle(.secondary).monospacedDigit()
                         }
                         Slider(value: $controller.inputGain, in: 0.5...2.0, step: 0.1)
-                        HStack(spacing: 8) {
+                        HStack(spacing: MP.spS) {
                             Image(systemName: controller.meterActive ? "waveform.circle.fill" : "waveform.circle")
                                 .foregroundStyle(controller.meterActive ? MP.blue : .secondary)
                             GeometryReader { geo in
@@ -61,14 +69,14 @@ struct SettingsView: View {
                                 }
                             }.frame(height: 8)
                             Text(controller.meterActive ? L(controller.state == .recording ? "錄音中收音" : "對著麥克風講話測試") : "")
-                                .font(.system(size: 11)).foregroundStyle(.tertiary)
+                                .font(MPFont.caption).foregroundStyle(.tertiary)
                         }
                     }
                     Toggle(L("錄音時即時逐字稿"), isOn: $controller.liveTranscribeEnabled)
-                    VStack(alignment: .leading, spacing: 2) {
+                    VStack(alignment: .leading, spacing: MP.spXS) {
                         Toggle(L("回音消除(喇叭外放·停止後處理)"), isOn: $controller.aecEnabled)
                         Text(L("用喇叭(非耳機)開會時,停止後自動消掉對方聲音被麥克風收進去的回音;純後製、不影響開會當下的聲音。"))
-                            .font(.system(size: 11)).foregroundStyle(.tertiary)
+                            .font(MPFont.caption).foregroundStyle(.tertiary).lineSpacing(3)
                     }
                     LabeledContent(L("錄音格式")) { Text(L("錄製 PCM → 存檔 m4a(雙聲道)")).foregroundStyle(.secondary) }
                 } header: { Text(L("錄音")) }
@@ -78,22 +86,22 @@ struct SettingsView: View {
                         ForEach(TranscriptionLanguage.allCases) { lang in Text(lang.label).tag(lang) }
                     }
                     Text(L("預設跟隨系統語言;不支援的語言會用英文。支援:英/繁中/日/韓/簡中。"))
-                        .font(.system(size: 11)).foregroundStyle(.tertiary)
+                        .font(MPFont.caption).foregroundStyle(.tertiary).lineSpacing(3)
                     Picker(L("引擎"), selection: $controller.engine) {
                         ForEach(TranscriptionEngine.allCases) { e in Text(e.label).tag(e) }
                     }
                     if controller.engine == .whisperKit { whisperModelRows }
-                    VStack(alignment: .leading, spacing: 2) {
+                    VStack(alignment: .leading, spacing: MP.spXS) {
                         Toggle(L("結束後自動產出高精度逐字稿"), isOn: $controller.autoTranscribeAfterStop)
                         Text(L("錄音停止後用 Whisper 高精度重轉一次;即時稿僅供會中參考。"))
-                            .font(.system(size: 11)).foregroundStyle(.tertiary)
+                            .font(MPFont.caption).foregroundStyle(.tertiary).lineSpacing(3)
                     }
                 } header: { Text(L("逐字稿")) }
 
                 Section {
                     LabeledContent(L("存檔目錄")) {
-                        HStack(spacing: 8) {
-                            Text(controller.recordingsDir.path).font(.system(size: 11)).foregroundStyle(.secondary)
+                        HStack(spacing: MP.spS) {
+                            Text(controller.recordingsDir.path).font(MPFont.caption).foregroundStyle(.secondary)
                                 .lineLimit(1).truncationMode(.middle)
                             Button(L("選擇…")) { chooseDir() }
                         }
@@ -108,6 +116,11 @@ struct SettingsView: View {
                 } header: { Text(L("權限")) }
             }
             .formStyle(.grouped)
+            // UI-22 item 9: build stamp 自 adBar 搬到這裡——設定頁底部小字,主畫面淨空。
+            Text(buildStamp)
+                .font(MPFont.caption.monospaced())
+                .foregroundStyle(.tertiary)
+                .padding(.horizontal, MP.spL).padding(.vertical, MP.spS)
         }
         .frame(width: 480, height: 640)
         .onAppear { controller.startMicMonitor() }
@@ -117,19 +130,19 @@ struct SettingsView: View {
     // MARK: - Whisper 模型管理(TR-16)
 
     private var whisperModelRows: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(L("Whisper 模型")).font(.system(size: 12, weight: .medium))
+        VStack(alignment: .leading, spacing: MP.spS) {
+            Text(L("Whisper 模型")).font(MPFont.label)
             ForEach(WhisperModel.knownModels) { m in
-                HStack(spacing: 8) {
-                    Text(m.display).font(.system(size: 11))
+                HStack(spacing: MP.spS) {
+                    Text(m.display).font(MPFont.caption)
                     Spacer()
                     if let p = modelProgress[m.id] {
                         ProgressView(value: p).frame(width: 80)
-                        Text("\(Int(p * 100))%").font(.system(size: 11)).monospacedDigit()
+                        Text("\(Int(p * 100))%").font(MPFont.caption).monospacedDigit()
                             .foregroundStyle(.secondary)
                     } else if installedIDs.contains(m.id) {
                         if activeModelID == m.id {
-                            Text(L("使用中")).font(.system(size: 11)).foregroundStyle(.green)
+                            Text(L("使用中")).font(MPFont.caption).foregroundStyle(.green)
                         } else {
                             Button(L("使用")) { setActiveModel(m) }.controlSize(.small)
                         }
@@ -144,7 +157,7 @@ struct SettingsView: View {
                 }
             }
             if let e = modelError {
-                Text(e).font(.system(size: 11)).foregroundStyle(.red)
+                Text(e).font(MPFont.caption).foregroundStyle(.red)
             }
         }
         .onAppear { refreshModels() }
@@ -197,7 +210,7 @@ struct SettingsView: View {
     }
 
     private func statusDot(_ ok: Bool) -> some View {
-        HStack(spacing: 6) {
+        HStack(spacing: MP.spS) {
             Circle().fill(ok ? Color.green : Color.orange).frame(width: 8, height: 8)
             Text(L(ok ? "已授權" : "未授權")).foregroundStyle(.secondary)
         }
