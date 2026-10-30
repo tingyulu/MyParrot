@@ -183,12 +183,77 @@ let phProblems = (try? String(contentsOfFile: locPath, encoding: .utf8)).map(pla
 let tableList = (try? String(contentsOfFile: locPath, encoding: .utf8)).map(tableKeyList) ?? []
 let duplicateKeys = Dictionary(tableList.map { ($0, 1) }, uniquingKeysWith: +).filter { $0.value > 1 }.keys.sorted()
 
+// ── MAS-28 D2(2026-10-29):每列八個譯文(en/ja/ko/zhCN/es/de/fr/ptBR)缺一即紅 ───────────────
+// 列＝從 key 行到以 `],` 收尾的那行(單行列也是);每列數各語言標籤出現次數,0 次＝缺、>1 次＝重複。
+let requiredLangs = ["en", "ja", "ko", "zhCN", "es", "de", "fr", "ptBR"]
+func languageProblems(in src: String) -> [String] {
+    var problems: [String] = []
+    var inTable = false, currentKey: String? = nil, counts: [String: Int] = [:]
+    func finish() {
+        guard let k = currentKey else { return }
+        for lang in requiredLangs where counts[lang, default: 0] != 1 {
+            problems.append("\(k.prefix(16))… 的 .\(lang) 有 \(counts[lang, default: 0]) 個(應恰好 1)")
+        }
+        currentKey = nil; counts = [:]
+    }
+    for raw in src.split(separator: "\n", omittingEmptySubsequences: false) {
+        let line = String(raw)
+        let trimmed = line.drop(while: { $0 == " " })
+        if line.contains("private static let table") { inTable = true; continue }
+        guard inTable else { continue }
+        if trimmed == "]" { finish(); inTable = false; continue }
+        if trimmed.hasPrefix("//") { continue }
+        if trimmed.first == "\"", let first = literals(in: line).first,
+           let afterKey = line.range(of: "\"\(first)\"").map({ line[$0.upperBound...] }),
+           afterKey.drop(while: { $0 == " " }).first == ":" {
+            finish(); currentKey = first
+        }
+        guard currentKey != nil else { continue }
+        // 去掉字串字面值後再數標籤,免得譯文裡的「.en:」之類被算進去
+        var stripped = "", inStr = false, esc = false
+        for ch in line {
+            if inStr { if esc { esc = false } else if ch == "\\" { esc = true } else if ch == "\"" { inStr = false } }
+            else if ch == "\"" { inStr = true } else { stripped.append(ch) }
+        }
+        for lang in requiredLangs { counts[lang, default: 0] += stripped.components(separatedBy: ".\(lang):").count - 1 }
+        let noComment = stripped.components(separatedBy: "//").first ?? stripped
+        if noComment.trimmingCharacters(in: .whitespaces).hasSuffix("],") { finish() }
+    }
+    return problems
+}
+let langProblems = (try? String(contentsOfFile: locPath, encoding: .utf8)).map(languageProblems) ?? []
+
+// ── MAS-32:九個 lproj 的 InfoPlist.strings 都要有六條 TCC 用途字串 ───────────────────────────
+let infoPlistKeys = ["NSMicrophoneUsageDescription", "NSAudioCaptureUsageDescription", "NSCalendarsFullAccessUsageDescription",
+                     "NSCalendarsUsageDescription", "NSSpeechRecognitionUsageDescription", "NSUserNotificationsUsageDescription"]
+let expectedLprojs = ["zh-Hant", "en", "ja", "ko", "zh-Hans", "es", "de", "fr", "pt-BR"]
+var lprojProblems: [String] = []
+for lang in expectedLprojs {
+    let path = repoRoot + "Resources/lproj/\(lang).lproj/InfoPlist.strings"
+    guard let src = try? String(contentsOfFile: path, encoding: .utf8) else { lprojProblems.append("缺 \(lang).lproj/InfoPlist.strings"); continue }
+    var found: [String: String] = [:]
+    for line in src.split(separator: "\n") {
+        let lits = literals(in: String(line))
+        if lits.count >= 2 { found[lits[0]] = lits[1] }
+    }
+    for k in infoPlistKeys where (found[k] ?? "").isEmpty { lprojProblems.append("\(lang).lproj 缺 \(k)") }
+}
+
 let missing = used.subtracting(table).sorted()
 print("🌐 翻譯表完整性檢查")
 print("   L() 使用的字面 key:\(used.count) · 翻譯表 key:\(table.count)")
-if missing.isEmpty && markedProblems.isEmpty && phProblems.isEmpty && duplicateKeys.isEmpty {
-    print("✅ 所有 key 都有翻譯(英/日/韓/簡中),無重複 key,Core 標記區段與 %@ 佔位符數量一致")
+if missing.isEmpty && markedProblems.isEmpty && phProblems.isEmpty && duplicateKeys.isEmpty && langProblems.isEmpty && lprojProblems.isEmpty {
+    print("✅ 所有 key 都有翻譯(英/日/韓/簡中/西/德/法/葡巴),無重複 key,Core 標記區段與 %@ 佔位符數量一致,九個 lproj 的 InfoPlist.strings 齊")
     exit(0)
+}
+if !langProblems.isEmpty {
+    print("❌ 翻譯表有列缺語言或重複語言(MAS-28 D2:每列八個譯文):")
+    for m in langProblems.prefix(30) { print("   · \(m)") }
+    if langProblems.count > 30 { print("   …共 \(langProblems.count) 條") }
+}
+if !lprojProblems.isEmpty {
+    print("❌ InfoPlist.strings(MAS-32)有問題:")
+    for m in lprojProblems { print("   · \(m)") }
 }
 if !missing.isEmpty {
     print("❌ 以下 key 缺翻譯(非繁中語系會顯示原繁中字串):")

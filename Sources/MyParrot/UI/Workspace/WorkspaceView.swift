@@ -185,7 +185,8 @@ struct WorkspaceView: View {
             }
             .mpBanner(color: MP.blue)
         }
-        // UPD:非阻斷更新提示——僅 idle 時顯示(錄音/暫停中不打擾,開會場景)。
+        // UPD:非阻斷更新提示——僅 idle 時顯示(錄音/暫停中不打擾,開會場景)。MAS-14:商店版不編(status 永遠 idle)。
+        #if !MYPARROT_MAS
         if case .updateAvailable(let ver, let url) = updates.status,
            controller.state == .idle, !updateBannerDismissed {
             HStack(spacing: MP.spS) {
@@ -198,6 +199,7 @@ struct WorkspaceView: View {
             }
             .mpBanner(color: MP.blue)
         }
+        #endif
     }
 
     // MARK: 內容直欄

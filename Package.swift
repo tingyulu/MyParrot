@@ -9,6 +9,13 @@ import Foundation
 let noAFM = ProcessInfo.processInfo.environment["MYPARROT_NO_AFM"] == "1"
 let afmSettings: [SwiftSetting] = noAFM ? [.define("MYPARROT_NO_AFM")] : []
 
+// #2646 Mac App Store 免費版(TEST_PLAN X 節 MAS-01):`MYPARROT_MAS=1 swift build` ⇒ 所有目標多一個 `MYPARROT_MAS`
+// 編譯條件 ⇒ 商店版(沙盒、bundle id tw.uncle.MyParrot.mas、錄音夾走 security-scoped bookmark、GitHub 更新檢查／
+// CLI 後端／外部指令／GUI×CLI 租約監看不編)。同一份原始碼、同一條 main;不帶旗標的 build 與今天逐 byte 等價。
+// 守門點集中在 MyParrotCore/BuildFlavor.swift 與各處 `#if MYPARROT_MAS`,`grep -rn 'BuildFlavor\.\|MYPARROT_MAS' Sources` 對帳。
+let mas = ProcessInfo.processInfo.environment["MYPARROT_MAS"] == "1"
+let flavorSettings: [SwiftSetting] = afmSettings + (mas ? [.define("MYPARROT_MAS")] : [])
+
 let package = Package(
     name: "MyParrot",
     platforms: [
@@ -42,19 +49,19 @@ let package = Package(
                 .product(name: "OpenCC", package: "SwiftyOpenCC")
             ],
             path: "Sources/MyParrotCore",
-            swiftSettings: afmSettings
+            swiftSettings: flavorSettings
         ),
         .executableTarget(
             name: "MyParrot",
             dependencies: ["MyParrotCore"],
             path: "Sources/MyParrot",
-            swiftSettings: afmSettings
+            swiftSettings: flavorSettings
         ),
         .executableTarget(
             name: "MyParrotSelfTest",
             dependencies: ["MyParrotCore"],
             path: "Sources/MyParrotSelfTest",
-            swiftSettings: afmSettings
+            swiftSettings: flavorSettings
         ),
         // CLI v1(2026-08-10 計畫,docs/worklogs/2026-08-10-cli-feasibility/)。
         // __info_plist 嵌進執行檔(Phase 6):bare CLI 呼叫 TCC 保護 API(語音辨識/
@@ -68,7 +75,7 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser")
             ],
             path: "Sources/MyParrotCLI",
-            swiftSettings: afmSettings,
+            swiftSettings: flavorSettings,
             linkerSettings: [
                 .unsafeFlags([
                     "-Xlinker", "-sectcreate",
@@ -84,7 +91,7 @@ let package = Package(
             name: "MyParrotTests",
             dependencies: ["MyParrotCore"],
             path: "Tests/MyParrotTests",
-            swiftSettings: afmSettings
+            swiftSettings: flavorSettings
         )
     ]
 )

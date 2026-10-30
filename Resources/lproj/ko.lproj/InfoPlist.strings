@@ -1,0 +1,8 @@
+/* MAS-32(#2646,兩版共用):TCC 用途字串九語;鍵與 Info.plist 的六條一致(NSCalendarsUsageDescription 與 FullAccess 同句)。 */
+
+"NSMicrophoneUsageDescription" = "MyParrot은 「나」의 목소리를 녹음하기 위해 마이크가 필요합니다.";
+"NSAudioCaptureUsageDescription" = "MyParrot은 회의 중 「상대방」의 목소리를 녹음하기 위해 시스템 오디오를 캡처해야 합니다.";
+"NSCalendarsFullAccessUsageDescription" = "MyParrot은 회의 시작 전에 녹음을 알려 주기 위해 선택한 캘린더를 읽습니다.";
+"NSCalendarsUsageDescription" = "MyParrot은 회의 시작 전에 녹음을 알려 주기 위해 선택한 캘린더를 읽습니다.";
+"NSSpeechRecognitionUsageDescription" = "MyParrot은 기기 내 음성 인식으로 녹음을 전사합니다.";
+"NSUserNotificationsUsageDescription" = "MyParrot은 회의 시작 전에 녹음을 알려 주기 위해 알림을 사용합니다.";

@@ -110,7 +110,7 @@ struct DialView: View {
         switch controller.state {
         case .idle:
             wholeKey(icon: "record.circle", tint: RemoteTheme.recordGlyph, label: L("開始錄音"), badge: "⌘R", key: "r") {
-                controller.startRecording()
+                RecordingConsent.confirmThen { controller.startRecording() }   // MAS-17:首次一次性提示
             }
         case .finished:
             wholeKey(icon: "plus", tint: RemoteTheme.plusGlyph, label: L("新錄音"), badge: "⌘N", key: "n") {

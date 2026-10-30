@@ -74,6 +74,12 @@ public final class UpdateChecker {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
     }
 
+    #if MYPARROT_MAS
+    /// 商店版(2.4.5 vii,MAS-14):更新只能走 Mac App Store。網路檢查整段不編——二進位裡沒有 api.github.com
+    /// (`strings` 驗)、設定頁沒有開關與「立即檢查」、不會有更新橫幅;status 永遠停在 .idle。
+    public func autoCheckAtLaunch() async {}
+    public func checkNow() async {}
+    #else
     /// 啟動路徑:enabled 且 currentVersion 有值才打;結果==skippedVersion→status 收斂為
     /// .upToDate(不彈)。一切網路失敗靜默(print log),不彈窗不擋啟動不重試。
     public func autoCheckAtLaunch() async {
@@ -98,14 +104,6 @@ public final class UpdateChecker {
         guard let newer = isNewer(remoteTag: release.tagName, localVersion: local) else { status = .failed; return }
         status = (newer && Self.isTrustedReleaseURL(release.htmlURL))
             ? .updateAvailable(version: stripVPrefix(release.tagName), url: release.htmlURL) : .upToDate
-    }
-
-    /// banner〔略過此版〕:存 skippedVersion=目前 updateAvailable 的 version,status→.upToDate。
-    public func skip() {
-        guard case .updateAvailable(let version, _) = status else { return }
-        skippedVersion = version
-        UserDefaults.standard.set(version, forKey: "skippedVersion")
-        status = .upToDate
     }
 
     private func stripVPrefix(_ tag: String) -> String {
@@ -136,5 +134,14 @@ public final class UpdateChecker {
     /// 是本專案 GitHub 頁面,免得被污染的回應打開任意 URL scheme。
     static func isTrustedReleaseURL(_ url: URL) -> Bool {
         url.scheme == "https" && url.host == "github.com" && url.path.hasPrefix("/tingyulu/MyParrot/")
+    }
+    #endif
+
+    /// banner〔略過此版〕:存 skippedVersion=目前 updateAvailable 的 version,status→.upToDate。
+    public func skip() {
+        guard case .updateAvailable(let version, _) = status else { return }
+        skippedVersion = version
+        UserDefaults.standard.set(version, forKey: "skippedVersion")
+        status = .upToDate
     }
 }

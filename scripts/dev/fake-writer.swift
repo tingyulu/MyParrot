@@ -39,6 +39,7 @@ struct FakeWriter {
         let seconds = take("--seconds").flatMap(Double.init)
         let dir = URL(fileURLWithPath: (dirArg as NSString).expandingTildeInPath, isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        MyParrotPaths.currentRecordingsDir = dir   // C2(#2646):租約/state/commands 在 <錄音夾>/.myparrot,跟正式 Core 同一條規則
         let w = Writer(dir: dir, mode: mode, owner: owner, title: title, maxSeconds: seconds)
         w.run()
     }

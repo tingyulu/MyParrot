@@ -28,6 +28,14 @@ public enum ExternalNotifyCommand {
         return env
     }
 
+    /// MAS-14 純函式:設定裡的那一行 ⇒ 真的要跑的指令。`allowed == false`(商店版,`BuildFlavor.allowsExternalCommand`)
+    /// 或整行空白 ⇒ nil(不跑);否則回去頭尾空白的指令。
+    public static func effective(_ raw: String, allowed: Bool) -> String? {
+        guard allowed else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     /// 同步執行(呼叫端自己丟到背景);stdin/stdout/stderr 都接 /dev/null。
     public static func run(_ command: String, environment: [String: String], timeout: TimeInterval = 10) -> Outcome {
         let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)

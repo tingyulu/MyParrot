@@ -40,6 +40,11 @@ public enum TranslationTarget: String, CaseIterable, Sendable, Codable {
     case ja = "ja"
     case ko = "ko"
     case zhHans = "zh-Hans"
+    // MAS-28 D2:首版九語,翻譯目標也加四語(Apple Translation 語言包都有)。
+    case es = "es"
+    case de = "de"
+    case fr = "fr"
+    case ptBR = "pt-BR"
 
     public static let defaultsKey = "translation.target"
     public static let `default`: TranslationTarget = .zhHant
@@ -52,6 +57,10 @@ public enum TranslationTarget: String, CaseIterable, Sendable, Codable {
         case .ja:     return Locale.Language(identifier: "ja-JP")
         case .ko:     return Locale.Language(identifier: "ko-KR")
         case .zhHans: return Locale.Language(identifier: "zh-Hans-CN")
+        case .es:     return Locale.Language(identifier: "es-ES")
+        case .de:     return Locale.Language(identifier: "de-DE")
+        case .fr:     return Locale.Language(identifier: "fr-FR")
+        case .ptBR:   return Locale.Language(identifier: "pt-BR")
         }
     }
 
@@ -66,6 +75,10 @@ public enum TranslationTarget: String, CaseIterable, Sendable, Codable {
         case .ja:     return "Japanese"
         case .ko:     return "Korean"
         case .zhHans: return "Simplified Chinese"
+        case .es:     return "Spanish"
+        case .de:     return "German"
+        case .fr:     return "French"
+        case .ptBR:   return "Brazilian Portuguese"
         }
     }
 
@@ -78,6 +91,10 @@ public enum TranslationTarget: String, CaseIterable, Sendable, Codable {
         case .ja:     return "日文"
         case .ko:     return "韓文"
         case .zhHans: return "簡體中文"
+        case .es:     return "西班牙文"
+        case .de:     return "德文"
+        case .fr:     return "法文"
+        case .ptBR:   return "葡萄牙文（巴西）"
         // l10n-keys:end
         }
     }
@@ -91,6 +108,10 @@ public enum TranslationTarget: String, CaseIterable, Sendable, Codable {
         case .ja:     return "日文"
         case .ko:     return "韓文"
         case .zhHans: return "簡中"
+        case .es:     return "西"
+        case .de:     return "德"
+        case .fr:     return "法"
+        case .ptBR:   return "葡"
         // l10n-keys:end
         }
     }

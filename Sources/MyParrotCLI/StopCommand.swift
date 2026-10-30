@@ -17,6 +17,7 @@ struct StopCommand: AsyncParsableCommand {
     static let guiStopTimeout: TimeInterval = 20
 
     func run() async throws {
+        _ = resolvedRecordingsDir(CLIConfigStore.load())   // C2:租約在 <錄音夾>/.myparrot,先把錄音夾定下來
         // #949 §5.7:先看全域租約決定分流;沒有租約才走舊版 record.pid(8/10 舊 CLI 在錄)。
         switch RecordingLeaseHolder.inspect() {
         case .alive(let lease) where lease.owner == "gui":
@@ -143,10 +144,10 @@ struct StatusCommand: ParsableCommand {
     @Flag(name: .long, help: "輸出 JSON(預設也是 JSON——status 天生是給 agent 讀的)") var json = false
 
     func run() throws {
+        let dir = resolvedRecordingsDir(CLIConfigStore.load())   // C2:先定錄音夾,租約/state 才找得到
         Output.jsonEvent(Self.snapshot(inspection: RecordingLeaseHolder.inspect(), state: StateStore.readState(),
                                        legacyPID: StateStore.activePID(),
-                                       recoverable: RecordingController.inprogressLeftovers(
-                                        dir: resolvedRecordingsDir(CLIConfigStore.load()))))
+                                       recoverable: RecordingController.inprogressLeftovers(dir: dir)))
     }
 
     /// #949 §3:`status` 的輸出(純函式,CLI SelfTest 可測)。

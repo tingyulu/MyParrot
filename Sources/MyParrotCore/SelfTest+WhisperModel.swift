@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 /// BUG-39／CLT-01(公開倉 issue #1,2026-10-28):Whisper 模型大小檢查的單位。`approxMB` 與 `isValid` 必須同一個單位(十進位 MB),
 /// 三個常數釘在 HuggingFace `ggerganov/whisper.cpp` 的 blob 位元數;正控＝舊常數 2,264,000,000 B 的 q5_0 必須被拒。
@@ -69,5 +70,51 @@ extension SelfTest {
         }
         return Result(name: "CLT-01 Whisper 模型大小檢查單位", passed: fails.isEmpty,
                       detail: fails.isEmpty ? "3 個上游位元數通過/顯示 GB 一致/±10% 四個邊界/正控 2264MB 拒" : fails.joined(separator: ";"))
+    }
+}
+
+/// MAS-12(#2646,併 #2638 G-4):SHA-256 釘模型——hash 函式對已知向量、verify 正反、孤兒 .part 只清舊的、三個常數格式。
+extension SelfTest {
+    static func whisperChecksumGate() -> Result {
+        var fails: [String] = []
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("mp_whisper_sha_\(UUID().uuidString.prefix(8))", isDirectory: true)
+        do { try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true) } catch {
+            return Result(name: "MAS-12 模型 SHA-256 閘", passed: false, detail: "暫存目錄建不出來:\(error)")
+        }
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let S = WhisperModelStore.self
+        // 1. 已知向量:SHA-256("abc")
+        let abc = dir.appendingPathComponent("abc.bin")
+        try? Data("abc".utf8).write(to: abc)
+        let want = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        if (try? S.sha256Hex(of: abc)) != want { fails.append("sha256(\"abc\") 應為 \(want.prefix(12))…,得 \((try? S.sha256Hex(of: abc)) ?? "nil")") }
+        // 2. 多塊串流(> 1 MiB)跟一次算一樣
+        let big = dir.appendingPathComponent("big.bin")
+        var blob = Data(count: (1 << 20) + 12345); blob[0] = 7; blob[blob.count - 1] = 9
+        try? blob.write(to: big)
+        let direct = SHA256.hash(data: blob).map { String(format: "%02x", $0) }.joined()
+        if (try? S.sha256Hex(of: big)) != direct { fails.append("串流 hash 與一次算不一致") }
+        // 3. verify 正反(正控:錯 hash 必拒;大小寫不敏感)
+        if !S.verify(abc, expectedSHA256: want.uppercased()) { fails.append("verify 正確 hash(大寫)應 true") }
+        if S.verify(abc, expectedSHA256: String(want.dropLast()) + "e") { fails.append("verify 錯 hash 應 false(正控)") }
+        if S.verify(dir.appendingPathComponent("nope.bin"), expectedSHA256: want) { fails.append("檔不存在應 false") }
+        // 4. 孤兒 .part:舊的刪、新的留、.bin 不碰
+        let now = Date()
+        let oldPart = dir.appendingPathComponent("ggml-x.bin.part"), freshPart = dir.appendingPathComponent("ggml-y.bin.part"), oldBin = dir.appendingPathComponent("ggml-z.bin")
+        for u in [oldPart, freshPart, oldBin] { try? Data("x".utf8).write(to: u) }
+        try? FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-3600)], ofItemAtPath: oldPart.path)
+        try? FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-3600)], ofItemAtPath: oldBin.path)
+        let removed = S.removeOrphanParts(in: dir, olderThan: 600, now: now)
+        if removed != ["ggml-x.bin.part"] { fails.append("應只刪舊的 .part,得 \(removed)") }
+        if !FileManager.default.fileExists(atPath: freshPart.path) { fails.append("新的 .part(下載中)不該被刪") }
+        if !FileManager.default.fileExists(atPath: oldBin.path) { fails.append(".bin 不該被刪") }
+        // 5. 三個常數:64 碼小寫 hex、互不相同
+        let hexes = WhisperModel.knownModels.map(\.sha256)
+        for (m, h) in zip(WhisperModel.knownModels, hexes) where h.count != 64 || h.lowercased() != h || h.contains(where: { !$0.isHexDigit }) {
+            fails.append("\(m.id) 的 sha256 常數格式不對")
+        }
+        if Set(hexes).count != hexes.count { fails.append("三個 sha256 常數有重複") }
+        return Result(name: "MAS-12 模型 SHA-256 閘", passed: fails.isEmpty,
+                      detail: fails.isEmpty ? "已知向量／串流／verify 正反／孤兒 .part 只清舊／常數格式 全過" : fails.joined(separator: ";"))
     }
 }

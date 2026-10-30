@@ -20,7 +20,7 @@ extension SelfTest {
         let d = UserDefaults(suiteName: suite)!
         d.removePersistentDomain(forName: suite)
         if R.needsPrivacyConfirmation("appleTranslation", defaults: d) { fails.append("本機後端不該跳隱私框") }
-        if !R.needsPrivacyConfirmation("claudeCLI", defaults: d) { fails.append("claudeCLI 未同意前應跳") }
+        if BuildFlavor.allowsCLIBackends, !R.needsPrivacyConfirmation("claudeCLI", defaults: d) { fails.append("claudeCLI 未同意前應跳") }   // MAS-14:商店版表裡沒有它
         R.select("appleTranslation", for: .translation, defaults: d)
         if R.selected(for: .translation, defaults: d).id != "appleTranslation" { fails.append("select/selected 往返錯") }
         R.select("appleTranslation", for: .minutes, defaults: d)

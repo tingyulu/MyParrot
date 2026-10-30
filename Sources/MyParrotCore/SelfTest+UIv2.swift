@@ -17,11 +17,13 @@ extension SelfTest {
         if R.off.capabilities != Set(ModelCapability.allCases) || !R.off.isLocal { fails.append("off 應支援全部能力且不出機") }
         if R.claudeCLI.id != CorrectionBackend.claudeCLI.rawValue || R.off.id != CorrectionBackend.off.rawValue { fails.append("登錄表 id 應等於 CorrectionBackend.rawValue") }
         if Set(ids(R.all)).count != R.all.count { fails.append("id 重複") }
+        // MAS-14:商店版建置的登錄表沒有兩個 CLI 後端,下面的期望值依旗標組(商店版本身的對照在 masRegistryWithoutCLI)。
+        let cli = BuildFlavor.allowsCLIBackends ? ["claudeCLI", "codexCLI"] : []
         // #2612:翻譯選單＝off／claudeCLI／codexCLI／appleTranslation(＋DEBUG localFake)
         #if DEBUG
-        let trExpected = ["off", "claudeCLI", "codexCLI", "appleTranslation", "localFake"]
+        let trExpected = ["off"] + cli + ["appleTranslation", "localFake"]
         #else
-        let trExpected = ["off", "claudeCLI", "codexCLI", "appleTranslation"]
+        let trExpected = ["off"] + cli + ["appleTranslation"]
         #endif
         if ids(R.backends(for: .translation)) != trExpected { fails.append("翻譯應列 \(trExpected),得 \(ids(R.backends(for: .translation)))") }
 
@@ -38,7 +40,7 @@ extension SelfTest {
         #if DEBUG
         branch = "DEBUG"
         if !R.includesDebugOnly { fails.append("DEBUG 建置 includesDebugOnly 應為 true") }
-        let expectedAll = AFMAvailability.isPlatformSupported ? ["off", "claudeCLI", "codexCLI", "appleFM", "appleTranslation", "localFake"] : ["off", "claudeCLI", "codexCLI", "appleTranslation", "localFake"]
+        let expectedAll = ["off"] + cli + (AFMAvailability.isPlatformSupported ? ["appleFM"] : []) + ["appleTranslation", "localFake"]
         if ids(R.all) != expectedAll { fails.append("DEBUG all 應為 \(expectedAll),得 \(ids(R.all))") }
         let expectedCap = expectedAll.filter { $0 != "appleTranslation" }   // 校正／會議記錄不列只做翻譯的後端
         for cap in [ModelCapability.correction, .minutes] where ids(R.backends(for: cap)) != expectedCap {
@@ -49,7 +51,7 @@ extension SelfTest {
         #else
         branch = "release"
         if R.includesDebugOnly { fails.append("release 建置 includesDebugOnly 應為 false") }
-        let expectedAll = AFMAvailability.isPlatformSupported ? ["off", "claudeCLI", "codexCLI", "appleFM", "appleTranslation"] : ["off", "claudeCLI", "codexCLI", "appleTranslation"]
+        let expectedAll = ["off"] + cli + (AFMAvailability.isPlatformSupported ? ["appleFM"] : []) + ["appleTranslation"]
         if ids(R.all) != expectedAll { fails.append("release all 應為 \(expectedAll),得 \(ids(R.all))") }
         let expectedCap = expectedAll.filter { $0 != "appleTranslation" }
         for cap in ModelCapability.allCases where R.backends(for: cap).contains(where: \.debugOnly) {
@@ -74,8 +76,12 @@ extension SelfTest {
         d.set("appleTranslation", forKey: "model.minutes")   // #2612:只做翻譯的後端拿去當會議記錄 ⇒ off
         if R.selected(for: .minutes, defaults: d).id != "off" { fails.append("後端不支援該能力應為 off") }
         R.select("claudeCLI", for: .minutes, defaults: d)
-        if d.string(forKey: "model.minutes") != "claudeCLI" || R.selected(for: .minutes, defaults: d).id != "claudeCLI" || !R.isEnabled(.minutes, defaults: d) {
-            fails.append("select claudeCLI → model.minutes 應生效")
+        if BuildFlavor.allowsCLIBackends {
+            if d.string(forKey: "model.minutes") != "claudeCLI" || R.selected(for: .minutes, defaults: d).id != "claudeCLI" || !R.isEnabled(.minutes, defaults: d) {
+                fails.append("select claudeCLI → model.minutes 應生效")
+            }
+        } else if d.string(forKey: "model.minutes") != "off" || R.isEnabled(.minutes, defaults: d) {
+            fails.append("MAS-14:商店版 select claudeCLI 應 fail closed 寫 off")   // 本建置不提供 ⇒ 跟不認得的 id 同路
         }
         R.select("bogus", for: .minutes, defaults: d)
         if d.string(forKey: "model.minutes") != "off" || R.isEnabled(.minutes, defaults: d) { fails.append("select 不認得的 id 應寫 off") }
@@ -106,17 +112,19 @@ extension SelfTest {
         defer { d.removePersistentDomain(forName: suite) }
         func reset() { for k in ["correctionBackend", "model.correction", "model.minutes", "model.translation"] { d.removeObject(forKey: k) } }
 
-        // 1. 舊鍵 claudeCLI、新鍵沒有 ⇒ 遷移,舊鍵保留
+        // 1. 舊鍵 claudeCLI、新鍵沒有 ⇒ 遷移,舊鍵保留。
+        //    MAS-14:商店版表裡沒有 claudeCLI ⇒ 鍵照樣搬(原樣複製)、但解析成 off(舊偏好指到 CLI 後端不崩、功能不出現)。
+        let wantCLI: CorrectionBackend = BuildFlavor.allowsCLIBackends ? .claudeCLI : .off
         reset()
         d.set("claudeCLI", forKey: "correctionBackend")
         let b1 = RecordingController.loadCorrectionBackend(defaults: d)
-        if b1 != .claudeCLI { fails.append("遷移後校正應仍為 claudeCLI,得 \(b1)") }
-        if d.string(forKey: "model.correction") != "claudeCLI" { fails.append("model.correction 應被寫成 claudeCLI") }
+        if b1 != wantCLI { fails.append("遷移後校正應為 \(wantCLI),得 \(b1)") }
+        if d.string(forKey: "model.correction") != "claudeCLI" { fails.append("model.correction 應被寫成 claudeCLI(原樣複製,解析另算)") }
         if d.string(forKey: "correctionBackend") != "claudeCLI" { fails.append("舊鍵應保留") }
         if d.object(forKey: "model.minutes") != nil { fails.append("遷移不應碰其他能力的鍵") }
         // 2. 重跑無副作用
         R.migrateLegacyKeys(defaults: d)
-        if d.string(forKey: "model.correction") != "claudeCLI" || RecordingController.loadCorrectionBackend(defaults: d) != .claudeCLI { fails.append("重跑遷移應不變") }
+        if d.string(forKey: "model.correction") != "claudeCLI" || RecordingController.loadCorrectionBackend(defaults: d) != wantCLI { fails.append("重跑遷移應不變") }
 
         // 3. 新鍵已有值 ⇒ 不覆蓋
         reset()
@@ -134,13 +142,13 @@ extension SelfTest {
         d.set("gpt9", forKey: "correctionBackend")
         if RecordingController.loadCorrectionBackend(defaults: d) != .off { fails.append("舊鍵垃圾值應解析成 off") }
 
-        // 6. 寫入走新鍵,舊鍵不再寫也不刪
+        // 6. 寫入走新鍵,舊鍵不再寫也不刪。MAS-14:商店版 save claudeCLI ⇒ select fail closed 寫 off(本建置不提供)。
         reset()
         d.set("off", forKey: "correctionBackend")
         RecordingController.saveCorrectionBackend(.claudeCLI, defaults: d)
-        if d.string(forKey: "model.correction") != "claudeCLI" { fails.append("save 應寫 model.correction") }
+        if d.string(forKey: "model.correction") != wantCLI.rawValue { fails.append("save 應寫 model.correction=\(wantCLI.rawValue)") }
         if d.string(forKey: "correctionBackend") != "off" { fails.append("save 不應動舊鍵") }
-        if RecordingController.loadCorrectionBackend(defaults: d) != .claudeCLI { fails.append("寫完讀回應為 claudeCLI") }
+        if RecordingController.loadCorrectionBackend(defaults: d) != wantCLI { fails.append("寫完讀回應為 \(wantCLI)") }
         RecordingController.saveCorrectionBackend(.off, defaults: d)
         if RecordingController.loadCorrectionBackend(defaults: d) != .off { fails.append("改回 off 讀回應為 off") }
         reset()
@@ -164,21 +172,24 @@ extension SelfTest {
         defer { d.removePersistentDomain(forName: suite) }
 
         if R.privacyAcceptedKey(for: "claudeCLI") != "privacyAccepted.claudeCLI" { fails.append("偏好鍵應為 privacyAccepted.<後端 id>") }
-        if !R.needsPrivacyConfirmation("claudeCLI", defaults: d) { fails.append("出機後端沒同意過應要問") }
+        // MAS-14:商店版登錄表沒有任何出機後端 ⇒ claudeCLI 等同不認得的 id,不問;GitHub 版照舊要問。
+        let cliAsks = BuildFlavor.allowsCLIBackends
+        if R.needsPrivacyConfirmation("claudeCLI", defaults: d) != cliAsks { fails.append("出機後端沒同意過應要問(商店版:表裡沒有 ⇒ 不問),allowsCLI=\(cliAsks)") }
         if R.needsPrivacyConfirmation("off", defaults: d) { fails.append("off 不應問") }
         if R.needsPrivacyConfirmation("gpt9", defaults: d) { fails.append("不認得的 id 不應問") }
         #if DEBUG
         if R.needsPrivacyConfirmation(R.localFake.id, defaults: d) { fails.append("本機後端(localFake)不應問") }
         #endif
+        if !cliAsks, R.all.contains(where: { !$0.isLocal }) { fails.append("商店版登錄表不應有任何出機後端,得 \(R.all.filter { !$0.isLocal }.map(\.id))") }
         // 正控:有一個出機後端被問到,才算尺量得到;同意後同一後端不再問(任何能力)
         R.acceptPrivacy("claudeCLI", defaults: d)
         if d.object(forKey: "privacyAccepted.claudeCLI") as? Bool != true { fails.append("acceptPrivacy 應寫 privacyAccepted.claudeCLI=true") }
         if R.needsPrivacyConfirmation("claudeCLI", defaults: d) { fails.append("同意過的後端不應再問") }
         // 同意不碰任何能力的選擇(選擇仍由 select 決定)
         for cap in ModelCapability.allCases where d.object(forKey: R.defaultsKey(for: cap)) != nil { fails.append("acceptPrivacy 不應寫 \(R.defaultsKey(for: cap))") }
-        // 撤銷同意(刪鍵)⇒ 又要問
+        // 撤銷同意(刪鍵)⇒ 又要問(商店版:仍不問)
         d.removeObject(forKey: "privacyAccepted.claudeCLI")
-        if !R.needsPrivacyConfirmation("claudeCLI", defaults: d) { fails.append("刪掉同意鍵後應再問") }
+        if R.needsPrivacyConfirmation("claudeCLI", defaults: d) != cliAsks { fails.append("刪掉同意鍵後應再問(商店版仍不問)") }
 
         return Result(name: "MDL-03 隱私確認判定(出機後端只問一次、以後端為單位、本機/off/不認得不問)", passed: fails.isEmpty,
                       detail: fails.isEmpty ? "鍵名/出機要問/off 不問/不認得不問/同意後不問/不碰能力選擇/刪鍵重問 全過" : fails.joined(separator: ";"))

@@ -88,8 +88,8 @@ public enum LeaseInspection: Equatable {
 public final class RecordingLeaseHolder: @unchecked Sendable {
     public static let fileName = "recording.lease"
 
-    /// `~/.config/myparrot`(與 CLI `CLIConfigStore.configDir` 同一條規則;`MYPARROT_CONFIG_DIR` 覆寫)。
-    public static func directory() -> URL { MyParrotPaths.configDir }
+    /// C2(#2646):`<錄音夾>/.myparrot/`(`MyParrotPaths.protocolDir`;之前是 `~/.config/myparrot`)。
+    public static func directory() -> URL { MyParrotPaths.protocolDir }
 
     public static func leaseURL(in dir: URL) -> URL { dir.appendingPathComponent(fileName) }
 

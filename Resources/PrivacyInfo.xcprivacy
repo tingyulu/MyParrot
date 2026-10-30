@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- #2646 MAS-04／27 privacy manifest。內容＝TEST_PLAN X 節「MAS 版的網路與資料範圍」與 docs/PRIVACY.md:
+         不追蹤、不收集任何資料類型;required-reason API 只有三類,理由碼依 Apple「Describing use of required reason API」。
+         兩版共用(GitHub 版嵌進去無害)。改這份要同步 PRIVACY.md 與 ASC 隱私問卷(MAS-27 人工對讀)。 -->
+    <key>NSPrivacyTracking</key>
+    <false/>
+    <key>NSPrivacyTrackingDomains</key>
+    <array/>
+    <key>NSPrivacyCollectedDataTypes</key>
+    <array/>
+    <key>NSPrivacyAccessedAPITypes</key>
+    <array>
+        <dict>
+            <!-- UserDefaults:只讀寫自己的偏好(engine、language、uiLanguage、視窗狀態…) -->
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>CA92.1</string>
+            </array>
+        </dict>
+        <dict>
+            <!-- 檔案時間戳:容器內(模型檔、波形快取、租約)＝C617.1;使用者選的錄音夾裡的錄音檔排序／收割判定＝3B52.1 -->
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>C617.1</string>
+                <string>3B52.1</string>
+            </array>
+        </dict>
+        <dict>
+            <!-- mach_absolute_time():系統音訊 tap 量測經過時間(SystemAudioCapture),不當指紋 -->
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategorySystemBootTime</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>35F9.1</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>

@@ -58,7 +58,30 @@ struct RootView: View {
         // 免得跟啟動時的系統權限框撞在一起;迷你模式沒有 RootView,下次標準模式再跳。
         .task {
             try? await Task.sleep(for: .seconds(1.5))
-            if !Task.isCancelled, ModelHint.shouldShow() { uiState.showModelHint = true }
+            guard !Task.isCancelled, !controller.needsRecordingsFolder else { return }   // MAS-06:先選錄音夾,其他框下次再說
+            // MAS-31:首啟先跳模型下載卡片;UI-57 模型提示排在它之後(同一次啟動只跳一個 alert)。
+            if Onboarding.shouldShow() { uiState.showOnboarding = true; return }
+            if ModelHint.shouldShow() { uiState.showModelHint = true }
+        }
+        // MAS-31(#2646,兩版都有):首啟模型下載卡片。「下載建議模型」走 WhisperDownloads(同設定頁),並打開設定捲到逐字稿區段看進度。
+        .alert(L("即時逐字稿已可用"), isPresented: $uiState.showOnboarding) {
+            Button(L("下載建議模型")) {
+                Onboarding.markShown(); uiState.showOnboarding = false
+                WhisperDownloads.shared.start(Onboarding.recommended, controller: controller)
+                uiState.settingsScrollTo = SettingsView.transcriptSectionID
+                uiState.showSettings = true
+            }
+            Button(L("稍後"), role: .cancel) { Onboarding.markShown(); uiState.showOnboarding = false }
+        } message: {
+            Text(Onboarding.message())
+        }
+        // MAS-06／07(#2646):商店版沒有可用的錄音夾(首次啟動／搬走／刪除／權限撤回)⇒ 先選;「稍後」會留著錄音鍵被擋的狀態,
+        // 按錄音時 lastError 會再提示。GitHub 版 needsRecordingsFolder 永遠 false,這個框不會出。
+        .alert(L("選擇錄音資料夾"), isPresented: $uiState.showFolderPrompt) {
+            Button(L("選擇…")) { uiState.showFolderPrompt = false; RecordingsFolderPicker.present(controller: controller) }
+            Button(L("稍後"), role: .cancel) { uiState.showFolderPrompt = false }
+        } message: {
+            Text(RecordingsFolderPicker.promptMessage(for: controller.recordingsFolderState))
         }
         .alert(L("逐字稿校正與會議記錄要先在設定開啟"), isPresented: $uiState.showModelHint) {
             Button(L("打開設定")) { uiState.modelHintOpenSettings() }

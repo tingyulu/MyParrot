@@ -58,6 +58,7 @@ public enum SelfTest {
             translationSRT(),
             tokenLedger(),   // #2623 TOK-01
             whisperModelSize(),   // BUG-39 CLT-01(案例在 SelfTest+WhisperModel.swift)
+            whisperChecksumGate(),   // MAS-12 SHA-256(同檔)
             tapExcludesSelf(),
             debugCommandParsing(),
             caseUpdateVersionCompare(),
@@ -119,7 +120,15 @@ public enum SelfTest {
             inprogressPathAndPublishName(),
             reapDecisionTable(),
             quarantineInsteadOfDelete(),
-            commandLifecycle()
+            commandLifecycle(),
+            // #2646 C2(案例在 SelfTest+Lease.swift)
+            protocolDirRules(),
+            legacyLeaseFallback(),
+            // #2646 MAS-08 商店版純函式(案例在 SelfTest+MAS.swift;兩種建置都要綠)
+            masBuildFlavor(),
+            masBookmarkStateMachine(),
+            masRegistryWithoutCLI(),
+            masExternalCommandIgnored()
         ]
     }
 

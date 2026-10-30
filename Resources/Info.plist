@@ -2,6 +2,37 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- MAS-06b(#2646,兩版共用):接受資料夾(拖到 Dock 圖示／open -a MyParrot <資料夾>)＝選錄音夾;LSHandlerRank None ⇒ 不會變成資料夾的預設開啟程式 -->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Folder</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>None</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.folder</string>
+			</array>
+		</dict>
+	</array>
+	<!-- MAS-32(#2646):開發語言＝繁中(Info.plist 本體的用途字串);九個 lproj 的 InfoPlist.strings 讓 TCC 框與商店語言頁對 -->
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh-Hant</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>zh-Hant</string>
+		<string>en</string>
+		<string>ja</string>
+		<string>ko</string>
+		<string>zh-Hans</string>
+		<string>es</string>
+		<string>de</string>
+		<string>fr</string>
+		<string>pt-BR</string>
+	</array>
 	<key>CFBundleDisplayName</key>
 	<string>MyParrot</string>
 	<key>CFBundleExecutable</key>

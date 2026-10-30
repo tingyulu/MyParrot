@@ -407,6 +407,17 @@ public final class RecordingController {
 
     public private(set) var recordingsDir: URL
 
+    /// MAS-06／07(#2646):錄音夾的書籤狀態。商店版由 `RecordingsFolderAccess.probe`＋`classify` 決定;
+    /// GitHub 版與 CLI 永遠 `.valid(recordingsDir)`(不走書籤,路徑字串照舊)。
+    public private(set) var recordingsFolderState: RecordingsFolderAccess.State = .unset
+    /// 商店版:目前 `startAccessingSecurityScopedResource` 中的 URL;換資料夾／重探／退出時 stop(MAS-29 配對)。
+    private var scopedFolderURL: URL?
+    public static let recordingsDirBookmarkKey = "recordingsDirBookmark"
+    /// 商店版:沒有可用的錄音夾(未選／搬走／刪除／權限撤回)⇒ UI 要先讓人選,`startRecording` 會擋。GitHub 版永遠 false。
+    public var needsRecordingsFolder: Bool { BuildFlavor.usesSecurityScopedRecordingsDir && recordingsFolderState.needsUserAction }
+    /// Core 繁中句(GUI 依介面語言重組,見 CoreMessageL10n)。
+    public nonisolated static let folderRequiredMessage = "請先選擇錄音資料夾"
+
     /// - Parameter explicitDir: CLI 用:直接指定錄音資料夾(config.json 的 recordingsDir),**不讀也不寫**
     ///   UserDefaults 的 `recordingsDir`。#949:舊寫法先 `init()` 再 `setRecordingsDir`,init 當下會先掃一次
     ///   偏好裡的舊資料夾(並跑收割)——CLI 指向示範夾時仍會碰到別的資料夾。GUI 不傳(照舊讀偏好/argument domain)。
@@ -415,6 +426,19 @@ public final class RecordingController {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         if let explicitDir {
             recordingsDir = explicitDir
+        } else if BuildFlavor.usesSecurityScopedRecordingsDir {
+            // MAS-06:沙盒下只能用使用者選過、以 app-scoped bookmark 記住的資料夾。沒有可用的 ⇒ 先指向容器內的
+            // 佔位夾(列表會是空的),`needsRecordingsFolder` 讓錄音鍵被擋、UI 跳選擇器——🚫 不會靜默錄進容器。
+            // probe 回來的可用 URL 已 startAccessing;stale 的書籤由 revalidateRecordingsFolder(onAppear)重存。
+            let (probe, accessing) = RecordingsFolderAccess.probe(bookmark: UserDefaults.standard.data(forKey: Self.recordingsDirBookmarkKey))
+            let st = RecordingsFolderAccess.classify(probe)
+            recordingsFolderState = st
+            if let usable = st.usableURL {
+                recordingsDir = usable
+                scopedFolderURL = accessing
+            } else {
+                recordingsDir = docs.appendingPathComponent("MyParrot", isDirectory: true)
+            }
         } else if let saved = UserDefaults.standard.string(forKey: "recordingsDir") {
             recordingsDir = URL(fileURLWithPath: saved, isDirectory: true)
         } else {
@@ -430,9 +454,11 @@ public final class RecordingController {
         fileTranscriber = built.file
         whisperEngine = built.whisper
         // All stored properties are initialized below this point.
+        MyParrotPaths.currentRecordingsDir = recordingsDir   // C2:協定檔(租約/state/commands)跟著錄音夾走,要在任何 lease/reap 之前
         try? FileManager.default.createDirectory(at: recordingsDir, withIntermediateDirectories: true)
-        // 舊 Application Support 位置的一次性搬家只屬於 GUI(用偏好資料夾時);CLI 指定資料夾不搬。
-        if explicitDir == nil { migrateLegacyRecordings(into: recordingsDir) }
+        // 舊 Application Support 位置的一次性搬家只屬於 GUI(用偏好資料夾時);CLI 指定資料夾不搬;商店版沒選夾時不搬(佔位夾不是目的地)。
+        if !BuildFlavor.usesSecurityScopedRecordingsDir || explicitDir != nil { recordingsFolderState = .valid(recordingsDir) }
+        if explicitDir == nil, !needsRecordingsFolder { migrateLegacyRecordings(into: recordingsDir) }
         if let raw = UserDefaults.standard.string(forKey: "language"),
            let lang = TranscriptionLanguage(rawValue: raw) { language = lang }
         if UserDefaults.standard.object(forKey: "inputGain") != nil {
@@ -443,6 +469,9 @@ public final class RecordingController {
         // 再依登錄表解析;鍵不存在/值不認得/本建置不提供 ⇒ 關閉。
         correctionBackend = Self.loadCorrectionBackend(defaults: UserDefaults.standard)
         correctionModel = UserDefaults.standard.string(forKey: "correctionModel") ?? ""
+        // MAS-12:上次下載中途留下的孤兒 .part(mtime 超過 10 分鐘)啟動時清掉;正在下載的不會被碰。
+        let orphans = WhisperModelStore.removeOrphanParts()
+        if !orphans.isEmpty { print("[whisper] removed orphan .part: \(orphans)") }
         codexModel = UserDefaults.standard.string(forKey: "codexModel") ?? ""
         if UserDefaults.standard.object(forKey: "autoTranscribe") != nil {
             transcribePolicy = TranscribePolicy.migrate(raw: UserDefaults.standard.string(forKey: TranscribePolicy.key),
@@ -966,13 +995,70 @@ public final class RecordingController {
 
     // MARK: - Save directory (#6)
 
+    /// Core 繁中句:錄音／暫停中不換夾(C2 後協定檔跟著夾走,換了會把心跳／state／commands 拆到兩夾;二審指出)。
+    public nonisolated static let folderChangeBlockedMessage = "錄音中不能更換錄音資料夾"
+
     public func setRecordingsDir(_ url: URL) {
+        guard state == .idle || state == .finished else { lastError = Self.folderChangeBlockedMessage; return }
+        if BuildFlavor.usesSecurityScopedRecordingsDir {
+            // MAS-06:NSOpenPanel／拖到圖示／`open -a` 給的 URL 自帶 scope。二審後的交換順序:先 start 新 token,
+            // start 失敗或寫不進 ⇒ 放掉新 token、不 commit、舊夾原樣(state=denied 讓 UI 提示);成功 ⇒ 存書籤、
+            // commit 新夾,最後無條件 stop 舊 token(同路徑也一樣,start/stop 一對一)。書籤建不起來只影響下次啟動。
+            let granted = url.startAccessingSecurityScopedResource()
+            guard granted, RecordingsFolderAccess.canWrite(in: url) else {
+                if granted { url.stopAccessingSecurityScopedResource() }
+                recordingsFolderState = .denied(url)
+                lastError = "沒有權限寫入所選的資料夾"
+                return
+            }
+            if let data = try? RecordingsFolderAccess.makeBookmark(for: url) {
+                defaults.set(data, forKey: Self.recordingsDirBookmarkKey)
+            } else {
+                defaults.removeObject(forKey: Self.recordingsDirBookmarkKey)
+                print("[MAS] bookmarkData failed for \(url.lastPathComponent)")
+            }
+            if let old = scopedFolderURL { old.stopAccessingSecurityScopedResource() }
+            scopedFolderURL = url
+            recordingsFolderState = .valid(url)
+        } else {
+            recordingsFolderState = .valid(url)
+        }
         recordingsDir = url
-        defaults.set(url.path, forKey: "recordingsDir")
+        MyParrotPaths.currentRecordingsDir = url   // C2
+        defaults.set(url.path, forKey: "recordingsDir")   // 商店版只供顯示;真相是書籤
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         loadRecordings()
         reapInprogress()   // #949:新資料夾裡租約已死的 inprogress 也復原
-        externalWatcher?.setDirectories([MyParrotPaths.configDir, url])   // #949:監看跟著換
+        externalWatcher?.setDirectories(Self.watchDirectories(for: url))   // #949:監看跟著換;C2 三個位置一起(二審:之前漏了舊位置)
+        refreshExternal()
+    }
+
+    /// MAS-07:回前景／啟動後重探一次書籤(資料夾被搬走 ⇒ stale 重存;被刪／權限撤回 ⇒ 請重選),錄音中不動。
+    /// GitHub 版什麼都不做。
+    public func revalidateRecordingsFolder() {
+        guard BuildFlavor.usesSecurityScopedRecordingsDir, state == .idle || state == .finished else { return }
+        let (probe, accessing) = RecordingsFolderAccess.probe(bookmark: defaults.data(forKey: Self.recordingsDirBookmarkKey))
+        let st = RecordingsFolderAccess.classify(probe)
+        if let old = scopedFolderURL { old.stopAccessingSecurityScopedResource() }   // probe 已對可用 URL 重新 startAccessing
+        scopedFolderURL = accessing
+        recordingsFolderState = st
+        guard let usable = st.usableURL else { return }
+        if usable.standardizedFileURL != recordingsDir.standardizedFileURL {
+            recordingsDir = usable
+            MyParrotPaths.currentRecordingsDir = usable   // C2
+            externalWatcher?.setDirectories(Self.watchDirectories(for: usable))
+            loadRecordings()
+        }
+        if case .stale = st, let data = try? RecordingsFolderAccess.makeBookmark(for: usable) {
+            defaults.set(data, forKey: Self.recordingsDirBookmarkKey)
+            recordingsFolderState = .valid(usable)
+        }
+    }
+
+    /// 退出前放掉 scope(MAS-29 start／stop 配對);GitHub 版 no-op。
+    public func releaseRecordingsFolderAccess() {
+        scopedFolderURL?.stopAccessingSecurityScopedResource()
+        scopedFolderURL = nil
     }
 
     // MARK: - Playback (#2)
@@ -1185,6 +1271,8 @@ public final class RecordingController {
 
     public func startRecording() {
         guard state == .idle || state == .finished else { return }
+        // MAS-07:商店版沒有可用的錄音夾就不開錄(訊息給 UI,🚫 不靜默錄進容器)。GitHub 版 needsRecordingsFolder 永遠 false。
+        if needsRecordingsFolder { lastError = Self.folderRequiredMessage; return }
         let date = Date()
         let title = currentTitle.isEmpty ? "錄音" : currentTitle
         // #892:同分鐘同標題不再覆蓋——探測到同 stem 既有檔就加「 2」「 3」後綴。

@@ -12,6 +12,8 @@ let buildStamp =
 struct SettingsView: View {
     /// UI-57:「模型」區段的捲動錨點(首次提示「打開設定」用)。
     static let modelSectionID = "model"
+    /// MAS-31:首啟卡片按「下載建議模型」後打開設定捲到「逐字稿」區段(看得到進度)。
+    static let transcriptSectionID = "transcript"
     @AppStorage(AppearanceMode.key) private var appearanceRaw = AppearanceMode.system.rawValue
     @Bindable var controller: RecordingController
     @Bindable var updates: UpdateChecker
@@ -21,9 +23,8 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var escMonitor: Any?
 
-    // Whisper 模型管理(TR-16)
-    @State private var modelProgress: [String: Double] = [:]
-    @State private var modelError: String?
+    // Whisper 模型管理(TR-16);MAS-31:下載進度與錯誤搬到 WhisperDownloads(首啟卡片共用)
+    private var downloads: WhisperDownloads { .shared }
     @State private var installedIDs: Set<String> = []
     @State private var activeModelID: String?
 
@@ -101,7 +102,7 @@ struct SettingsView: View {
                     Picker(L("辨識語言"), selection: $controller.language) {
                         ForEach(TranscriptionLanguage.allCases) { lang in Text(L(lang.label)).tag(lang) }
                     }
-                    Text(L("預設跟隨系統語言;不支援的語言會用英文。支援:英/繁中/日/韓/簡中。"))
+                    Text(L("預設跟隨系統語言;不支援的語言會用英文。支援:英/繁中/日/韓/簡中/西/德/法/葡(巴西)。"))
                         .font(MPFont.caption).foregroundStyle(.tertiary).lineSpacing(3)
                     // 2026-08-23 Eric:雲端(自帶 API)尚未實作,選單先藏(enum 保留給 Core/CLI 相容;舊設定值 .cloud 由 Core 回退原生)。
                     Picker(L("引擎"), selection: $controller.engine) {
@@ -121,6 +122,7 @@ struct SettingsView: View {
                             .font(MPFont.caption).foregroundStyle(.tertiary).lineSpacing(3)
                     }
                 } header: { Text(L("逐字稿")) }
+                .id(Self.transcriptSectionID)
 
                 // #2438 T3／MDL-03:單一「模型」區段(取代 #2417「逐字稿校正」區段;每個能力各選後端,預設全關)。
                 ModelSettingsSection(controller: controller, uiState: uiState).id(Self.modelSectionID)
@@ -130,9 +132,15 @@ struct SettingsView: View {
                 Section {
                     LabeledContent(L("存檔目錄")) {
                         HStack(spacing: MP.spS) {
-                            Text(controller.recordingsDir.path).font(MPFont.caption).foregroundStyle(.secondary)
-                                .lineLimit(1).truncationMode(.middle)
+                            if controller.needsRecordingsFolder {   // MAS-07:商店版沒有可用的錄音夾 ⇒ 顯示原因而不是佔位路徑
+                                Text(RecordingsFolderPicker.promptMessage(for: controller.recordingsFolderState))
+                                    .font(MPFont.caption).foregroundStyle(.orange).lineLimit(2)
+                            } else {
+                                Text(controller.recordingsDir.path).font(MPFont.caption).foregroundStyle(.secondary)
+                                    .lineLimit(1).truncationMode(.middle)
+                            }
                             Button(L("選擇…")) { chooseDir() }
+                                .disabled(controller.state == .recording || controller.state == .paused)   // C2 二審:錄音中不換夾
                         }
                     }
                     LabeledContent(L("檔名範本")) { Text(L("日期+時間+會議名稱")).foregroundStyle(.secondary) }
@@ -145,14 +153,18 @@ struct SettingsView: View {
                 } header: { Text(L("權限")) }
 
                 // UPD:目前版本+自動檢查開關+立即檢查+結果字串。
+                // MAS-14(2.4.5 vii):商店版沒有更新檢查——開關與「立即檢查」不編,區段標題改「關於」(MAS-16 的法務區塊接在這裡)。
                 Section {
                     LabeledContent(L("目前版本")) { Text(UpdateChecker.currentVersion ?? "dev").foregroundStyle(.secondary) }
+                    AboutLegalRows()   // MAS-16:隱私政策／原始碼與授權／第三方授權(兩版都有)
+                    #if !MYPARROT_MAS
                     Toggle(L("啟動時自動檢查更新"), isOn: $updates.enabled)
                     HStack {
                         Button(L("立即檢查")) { Task { await updates.checkNow() } }
                         updateStatusText
                     }
-                } header: { Text(L("軟體更新")) }
+                    #endif
+                } header: { Text(L(BuildFlavor.isMAS ? "關於" : "軟體更新")) }
             }
             .formStyle(.grouped)
             // UI-57:「打開設定」要直接捲到「模型」區段;設定頁剛開 Form 還在排版,延遲一拍再捲。
@@ -199,7 +211,7 @@ struct SettingsView: View {
                 HStack(spacing: MP.spS) {
                     Text(L(m.display)).font(MPFont.caption)
                     Spacer()
-                    if let p = modelProgress[m.id] {
+                    if let p = downloads.progress[m.id] {
                         ProgressView(value: p).frame(width: 80)
                         Text("\(Int(p * 100))%").font(MPFont.caption).monospacedDigit()
                             .foregroundStyle(.secondary)
@@ -215,15 +227,18 @@ struct SettingsView: View {
                             controller.reloadTranscriptionEngine()
                         }.controlSize(.small)
                     } else if m.downloadURL != nil {
-                        Button(L("下載")) { downloadModel(m) }.controlSize(.small)
+                        Button(L("下載")) { downloads.start(m, controller: controller) }.controlSize(.small)
                     }
                 }
             }
-            if let e = modelError {
+            if let e = downloads.error {
                 Text(e).font(MPFont.caption).foregroundStyle(.red)
             }
+            // MAS-31:設定頁可重跑首啟導引(下次回主視窗就跳)
+            Button(L("重新顯示首次導引")) { Onboarding.reset(); uiState.showOnboarding = true }.controlSize(.small)
         }
         .onAppear { refreshModels() }
+        .onChange(of: downloads.completedCount) { _, _ in refreshModels() }
     }
 
     private func refreshModels() {
@@ -241,36 +256,7 @@ struct SettingsView: View {
         refreshModels()
     }
 
-    private func downloadModel(_ m: WhisperModel) {
-        modelProgress[m.id] = 0
-        modelError = nil
-        Task {
-            do {
-                _ = try await WhisperModelStore.download(m) { p in
-                    Task { @MainActor in modelProgress[m.id] = p }
-                }
-                modelProgress[m.id] = nil
-                if UserDefaults.standard.string(forKey: "whisperModel") == nil {
-                    UserDefaults.standard.set(m.id, forKey: "whisperModel")
-                }
-                controller.reloadTranscriptionEngine()
-                refreshModels()
-            } catch {
-                modelProgress[m.id] = nil
-                modelError = "\(L("下載失敗")):\(error)"
-            }
-        }
-    }
-
-    private func chooseDir() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.prompt = L("選擇…")
-        panel.directoryURL = controller.recordingsDir
-        if panel.runModal() == .OK, let url = panel.url { controller.setRecordingsDir(url) }
-    }
+    private func chooseDir() { RecordingsFolderPicker.present(controller: controller) }   // MAS-06:與首啟提示共用
 
     private func statusDot(_ ok: Bool) -> some View {
         HStack(spacing: MP.spS) {
@@ -279,8 +265,9 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - UPD 軟體更新
+    // MARK: - UPD 軟體更新(商店版不編,MAS-14)
 
+    #if !MYPARROT_MAS
     @ViewBuilder
     private var updateStatusText: some View {
         switch updates.status {
@@ -302,4 +289,5 @@ struct SettingsView: View {
             Text(L("檢查失敗")).font(MPFont.caption).foregroundStyle(.red)
         }
     }
+    #endif
 }

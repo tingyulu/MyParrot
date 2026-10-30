@@ -1,6 +1,7 @@
 #if DEBUG
 import AppKit
 import SwiftUI
+import os
 import MyParrotCore
 
 /// #2412 只在 DEBUG 建置存在的控制通道(Shiyin 研究 B):讓驗證腳本不靠 AX 按鈕、
@@ -192,6 +193,150 @@ enum DebugControl {
             default: write(["ok": false, "error": "usage: afm status|force <reason>|clear"], to: out); return
             }
             write(["ok": true] .merging(afmJSON(), uniquingKeysWith: { a, _ in a }), to: out)
+        case "folder-prompt":
+            // MAS-06／07:status | show(叫出「選擇錄音資料夾」框)| later(＝按「稍後」)| revalidate(重探書籤)
+            switch params.first {
+            case "status": break
+            case "show": ui.showFolderPrompt = true
+            case "later": ui.showFolderPrompt = false
+            case "revalidate": c.revalidateRecordingsFolder()
+            default: write(["ok": false, "error": "usage: folder-prompt status|show|later|revalidate"], to: out); return
+            }
+            write(["ok": true, "presented": ui.showFolderPrompt, "needsFolder": c.needsRecordingsFolder,
+                   "state": String(describing: c.recordingsFolderState), "recordingsDir": c.recordingsDir.path], to: out)
+        case "whisper":
+            // MAS-11／12／13:list(已裝＋sha 驗證)| download <id>(真下載,結束才寫結果)| delete <id> | verify <id>
+            let store = WhisperModelStore.self
+            func info(_ m: WhisperModel) -> [String: Any] {
+                let u = store.modelsDir.appendingPathComponent(m.fileName)
+                let installed = store.installed().contains { $0.model.id == m.id }
+                return ["id": m.id, "installed": installed, "path": u.path, "approxMB": m.approxMB,
+                        "sha256ok": installed ? store.verify(u, expectedSHA256: m.sha256) : NSNull()]
+            }
+            switch params.first {
+            case "list":
+                write(["ok": true, "modelsDir": store.modelsDir.path, "active": store.activeModelURL()?.path ?? NSNull(),
+                       "engine": c.engine.rawValue, "models": WhisperModel.knownModels.map(info)], to: out)
+            case "download":
+                guard let m = WhisperModel.knownModels.first(where: { $0.id == params.dropFirst().first ?? "" }) else {
+                    write(["ok": false, "error": "unknown model id"], to: out); return
+                }
+                Task {
+                    let started = Date()
+                    do {
+                        let u = try await store.download(m) { _ in }
+                        if UserDefaults.standard.string(forKey: "whisperModel") == nil { UserDefaults.standard.set(m.id, forKey: "whisperModel") }
+                        await MainActor.run { c.reloadTranscriptionEngine() }
+                        write(["ok": true, "path": u.path, "seconds": Date().timeIntervalSince(started),
+                               "sha256ok": store.verify(u, expectedSHA256: m.sha256)], to: out)
+                    } catch {
+                        write(["ok": false, "error": "\(error)", "seconds": Date().timeIntervalSince(started),
+                               "partLeft": FileManager.default.fileExists(atPath: store.modelsDir.appendingPathComponent(m.fileName + ".part").path)], to: out)
+                    }
+                }
+                return   // 結果由 Task 寫
+            case "delete":
+                guard let m = WhisperModel.knownModels.first(where: { $0.id == params.dropFirst().first ?? "" }) else {
+                    write(["ok": false, "error": "unknown model id"], to: out); return
+                }
+                store.delete(m); c.reloadTranscriptionEngine()
+                write(["ok": true, "models": WhisperModel.knownModels.map(info)], to: out)
+            case "verify":
+                guard let m = WhisperModel.knownModels.first(where: { $0.id == params.dropFirst().first ?? "" }) else {
+                    write(["ok": false, "error": "unknown model id"], to: out); return
+                }
+                write(info(m).merging(["ok": true]) { $1 }, to: out)
+            default: write(["ok": false, "error": "usage: whisper list|download <id>|delete <id>|verify <id>"], to: out)
+            }
+        case "engine":
+            // get | set appleNative|whisperKit(同設定頁 picker:寫偏好、閒置時立刻重建引擎)
+            switch params.first {
+            case "get": break
+            case "set":
+                guard let e = TranscriptionEngine(rawValue: params.dropFirst().first ?? "") else { write(["ok": false, "error": "usage: engine set appleNative|whisperKit"], to: out); return }
+                c.engine = e   // didSet 寫偏好＋閒置時重建引擎
+            default: write(["ok": false, "error": "usage: engine get|set <appleNative|whisperKit>"], to: out); return
+            }
+            write(["ok": true, "engine": c.engine.rawValue, "activeModel": WhisperModelStore.activeModelURL()?.lastPathComponent ?? NSNull()], to: out)
+        case "onboarding":
+            // MAS-31:status | reset | show | download(＝按「下載建議模型」)| later
+            switch params.first {
+            case "status": break
+            case "reset": Onboarding.reset()
+            case "show": ui.showOnboarding = true
+            case "download":
+                Onboarding.markShown(); ui.showOnboarding = false
+                WhisperDownloads.shared.start(Onboarding.recommended, controller: c)
+                ui.settingsScrollTo = SettingsView.transcriptSectionID; ui.showSettings = true
+            case "later": Onboarding.markShown(); ui.showOnboarding = false
+            default: write(["ok": false, "error": "usage: onboarding status|reset|show|download|later"], to: out); return
+            }
+            write(["ok": true, "shown": Onboarding.shown, "presented": ui.showOnboarding, "shouldShow": Onboarding.shouldShow(),
+                   "downloading": Array(WhisperDownloads.shared.progress.keys), "message": Onboarding.message()], to: out)
+        case "scope-probe":
+            // MAS-33:書籤解出的 URL startAccessing 應 true;用 path 重建的 URL startAccessing 應 false(沒有 scope 屬性)。
+            guard let data = UserDefaults.standard.data(forKey: RecordingController.recordingsDirBookmarkKey) else {
+                write(["ok": false, "error": "no bookmark"], to: out); return
+            }
+            var stale = false
+            guard let scoped = try? URL(resolvingBookmarkData: data, options: .withSecurityScope, relativeTo: nil, bookmarkDataIsStale: &stale) else {
+                write(["ok": false, "error": "resolve failed"], to: out); return
+            }
+            // 先把 controller 持有的 scope 放掉:process 已拿到該夾的 extension 時,任何同路徑 URL 的 startAccessing 都會回 true
+            //(第一版探針就是這樣量到 rebuilt=true),量不到「重建 URL 沒有 scope」這件事。量完 revalidate 把 scope 拿回來。
+            c.releaseRecordingsFolderAccess()
+            let rebuilt = URL(fileURLWithPath: scoped.path, isDirectory: true)
+            let b = rebuilt.startAccessingSecurityScopedResource()
+            if b { rebuilt.stopAccessingSecurityScopedResource() }
+            let a = scoped.startAccessingSecurityScopedResource()
+            if a { scoped.stopAccessingSecurityScopedResource() }
+            c.revalidateRecordingsFolder()
+            write(["ok": true, "isMAS": BuildFlavor.isMAS, "bookmarkURLStart": a, "rebuiltURLStart": b, "stale": stale,
+                   "restored": String(describing: c.recordingsFolderState)], to: out)
+        case "consent":
+            // MAS-17:status | reset(下次按錄音再跳)| show(走真的提示,同意會開錄)| accept | cancel(回答掛著的 sheet)
+            switch params.first {
+            case "status": break
+            case "reset": RecordingConsent.reset()
+            case "show": RecordingConsent.confirmThen { c.startRecording() }
+            case "accept": if !RecordingConsent.respond(accept: true) { write(["ok": false, "error": "no sheet"], to: out); return }
+            case "cancel": if !RecordingConsent.respond(accept: false) { write(["ok": false, "error": "no sheet"], to: out); return }
+            default: write(["ok": false, "error": "usage: consent status|reset|show|accept|cancel"], to: out); return
+            }
+            write(["ok": true, "shown": RecordingConsent.shown, "presented": RecordingConsent.isPresented, "state": "\(c.state)"], to: out)
+        case "legal":
+            // MAS-16:連結與第三方授權全文有沒有打進 bundle
+            write(["ok": true, "privacyPolicy": AppLinks.privacyPolicy.absoluteString, "repository": AppLinks.repository.absoluteString,
+                   "licenses": ThirdPartyLicense.all.map { ["name": $0.id, "license": $0.license, "file": $0.file, "bundled": $0.bundled, "bytes": $0.text.utf8.count] }], to: out)
+        case "prefs":
+            // MAS-05 隔離驗證:只印**自己這個網域**(persistentDomain(forName: bundle id))的鍵與可讀值;
+            // Data 型(書籤)只印長度,不把路徑／書籤內容吐出去。
+            let domain = Bundle.main.bundleIdentifier ?? "?"
+            let dict = UserDefaults.standard.persistentDomain(forName: domain) ?? [:]
+            var shown: [String: Any] = [:]
+            for (k, v) in dict {
+                if let d = v as? Data { shown[k] = "<data \(d.count) bytes>" }
+                else if let s = v as? String { shown[k] = s.count > 80 ? String(s.prefix(80)) + "…" : s }
+                else if v is NSNumber || v is Bool || v is Int || v is Double { shown[k] = v }
+                else if let a = v as? [Any] { shown[k] = "<array \(a.count)>" }
+                else { shown[k] = "<\(type(of: v))>" }
+            }
+            write(["ok": true, "domain": domain, "count": dict.count, "keys": shown], to: out)
+        case "sandbox-probe":
+            // MAS-03:試在指定絕對路徑寫一個檔再刪(沙盒版對真 ~/Documents 應 EPERM;GitHub 版正控應成功)。
+            guard let target = params.first, target.hasPrefix("/") else { write(["ok": false, "error": "usage: sandbox-probe </abs/path/file>"], to: out); return }
+            let url = URL(fileURLWithPath: target)
+            var result: [String: Any] = ["path": target, "home": NSHomeDirectory(),
+                                         "containerID": ProcessInfo.processInfo.environment["APP_SANDBOX_CONTAINER_ID"] ?? NSNull(),
+                                         "isMAS": BuildFlavor.isMAS]
+            do {
+                try Data("probe".utf8).write(to: url, options: .atomic)
+                try? FileManager.default.removeItem(at: url)
+                result["ok"] = true; result["wrote"] = true
+            } catch {
+                result["ok"] = true; result["wrote"] = false; result["error"] = "\(error)"
+            }
+            write(result, to: out)
         case "model-hint":
             // UI-57:status(偏好 shown、框是否正顯示)| reset(刪偏好,下次啟動再跳)| show(立刻叫出框)
             switch params.first {
@@ -221,6 +366,17 @@ enum DebugControl {
             }
             write(["ok": true, "showSettings": ui.showSettings], to: out)
         case "window":
+            // MAS-17:window hide|show ＝ 關窗模式(orderOut,同 -backgroundStart)／叫回視窗,驗關窗時的 Dock badge 與選單列指示。
+            if params.first == "hide" {
+                BackgroundStart.hideWindows()
+                write(["ok": true, "visibleWindows": NSApp.windows.filter(\.isVisible).count,
+                       "indicator": ["badge": (RecordingIndicator.badge as Any?) ?? NSNull(), "statusItem": RecordingIndicator.isShowing]], to: out); return
+            }
+            if params.first == "show" {
+                NSApp.activate(ignoringOtherApps: true)
+                NSApp.windows.first { $0.canBecomeMain }?.makeKeyAndOrderFront(nil)
+                write(["ok": true, "visibleWindows": NSApp.windows.filter(\.isVisible).count], to: out); return
+            }
             // window size <w> <h>:直接設視窗 frame(模擬使用者拖視窗邊;AppKit 會夾到內容最小尺寸),驗 UI-47 最小寬度與壓縮。
             if params.first == "size" {
                 guard params.count >= 3, let w = Double(params[1]), let h = Double(params[2]), let win = wm.currentWindow() else {
@@ -610,6 +766,15 @@ enum DebugControl {
             "pendingHighAccuracy": c.pendingHighAccuracy.count,
             "transcriptVersion": c.transcriptVersion,
             "recordingsDir": c.recordingsDir.path,
+            // MAS-17:一次性錄音提示與錄音中指示(Dock badge／選單列)
+            "consent": ["shown": RecordingConsent.shown, "presented": RecordingConsent.isPresented],
+            "onboarding": ["shown": Onboarding.shown, "presented": ui.showOnboarding],   // MAS-31
+            "indicator": ["badge": (RecordingIndicator.badge as Any?) ?? NSNull(), "statusItem": RecordingIndicator.isShowing],
+            // MAS-03／06／07:書籤狀態、是否要先選夾、沙盒容器 id(非沙盒＝null)、NSHomeDirectory(沙盒＝容器 Data)。
+            "recordingsFolder": ["state": String(describing: c.recordingsFolderState), "needsFolder": c.needsRecordingsFolder,
+                                 "promptPresented": ui.showFolderPrompt],
+            "sandbox": ["isMAS": BuildFlavor.isMAS, "home": NSHomeDirectory(),
+                        "containerID": ProcessInfo.processInfo.environment["APP_SANDBOX_CONTAINER_ID"] ?? NSNull()],
             "recordings": c.recordings.map { ["title": $0.title, "hasTranscript": $0.hasTranscript, "isConverting": $0.isConverting] },
             "build": buildStamp,
             // #2438 R1:打包字型有沒有註冊成功(驗證計時字型)。
@@ -948,7 +1113,15 @@ enum DebugControl {
     private static func write(_ obj: [String: Any], to path: String) {
         guard DebugCommand.isAllowedResultPath(path),
               let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]) else { return }
-        try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
+        do {
+            try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+        } catch {
+            // #2646 MAS:沙盒版寫不進 /tmp 或家目錄(只有已選的錄音夾有 scope)⇒ 把結果吐到 unified log,
+            // 驗證腳本用 `log show --predicate 'subsystem == "tw.uncle.MyParrot.debugctl"'` 讀。單行 JSON,沙盒事故不會害結果消失。
+            let compact = (try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            Logger(subsystem: "tw.uncle.MyParrot.debugctl", category: "result")
+                .notice("\(path, privacy: .public) \(compact, privacy: .public)")
+        }
     }
 }
 #endif

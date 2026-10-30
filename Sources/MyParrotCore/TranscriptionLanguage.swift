@@ -9,6 +9,11 @@ public enum TranscriptionLanguage: String, CaseIterable, Identifiable, Sendable 
     case ja
     case ko
     case zhCN
+    // MAS-28 D2(Eric 2026-10-29):首版九語,辨識語言跟介面語言一起加(Apple SpeechAnalyzer 與 whisper 都支援)。
+    case es
+    case de
+    case fr
+    case ptBR
 
     public var id: String { rawValue }
 
@@ -22,6 +27,10 @@ public enum TranscriptionLanguage: String, CaseIterable, Identifiable, Sendable 
         case .ja:     return "日本語"
         case .ko:     return "한국어"
         case .zhCN:   return "简体中文"
+        case .es:     return "Español"
+        case .de:     return "Deutsch"
+        case .fr:     return "Français"
+        case .ptBR:   return "Português (Brasil)"
         }
     }
 
@@ -33,6 +42,10 @@ public enum TranscriptionLanguage: String, CaseIterable, Identifiable, Sendable 
         case .ja:     return Locale(identifier: "ja-JP")
         case .ko:     return Locale(identifier: "ko-KR")
         case .zhCN:   return Locale(identifier: "zh-CN")
+        case .es:     return Locale(identifier: "es-ES")
+        case .de:     return Locale(identifier: "de-DE")
+        case .fr:     return Locale(identifier: "fr-FR")
+        case .ptBR:   return Locale(identifier: "pt-BR")
         }
     }
 
@@ -47,6 +60,10 @@ public enum TranscriptionLanguage: String, CaseIterable, Identifiable, Sendable 
         case "ja": return Locale(identifier: "ja-JP")
         case "ko": return Locale(identifier: "ko-KR")
         case "en": return Locale(identifier: "en-US")
+        case "es": return Locale(identifier: "es-ES")
+        case "de": return Locale(identifier: "de-DE")
+        case "fr": return Locale(identifier: "fr-FR")
+        case "pt": return Locale(identifier: "pt-BR")
         default:   return Locale(identifier: "en-US")
         }
     }

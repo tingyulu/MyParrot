@@ -132,6 +132,10 @@ func parseLanguage(_ raw: String) -> TranscriptionLanguage? {
     case "en-us", "en_us": return .en
     case "ja-jp", "ja_jp": return .ja
     case "ko-kr", "ko_kr": return .ko
+    case "es-es", "es_es": return .es          // MAS-28 D2:四語別名
+    case "de-de", "de_de": return .de
+    case "fr-fr", "fr_fr": return .fr
+    case "pt-br", "pt_br", "pt": return .ptBR
     default: return nil
     }
 }
@@ -168,11 +172,14 @@ enum CLIConfigStore {
 /// 生效的錄音目錄:config.recordingsDir(展開 `~`)→ 預設同 GUI(`~/Documents/
 /// MyParrot`)。純函式,SelfTest 覆蓋。
 func resolvedRecordingsDir(_ config: CLIConfigSchema) -> URL {
+    let url: URL
     if let dir = config.recordingsDir, !dir.isEmpty {
-        return URL(fileURLWithPath: expandTilde(dir), isDirectory: true)
+        url = URL(fileURLWithPath: expandTilde(dir), isDirectory: true)
+    } else {
+        url = MyParrotPaths.defaultRecordingsDir
     }
-    let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-    return docs.appendingPathComponent("MyParrot", isDirectory: true)
+    MyParrotPaths.currentRecordingsDir = url   // C2:租約/state/commands 跟著錄音夾走(status/stop/record 都先經這裡)
+    return url
 }
 
 /// `config get/set <keypath>`——有限已知 schema 的 keypath(不是任意 JSON path)。

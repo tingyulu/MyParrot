@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- #2646 Mac App Store 免費版(TEST_PLAN X 節 MAS-02):六條全是非受限 entitlement,不需 provisioning profile(TN3125)。
+         GitHub 版用 MyParrot.entitlements(不動);build-app.sh 的 mas-dev／mas-dist 模式才用這份。 -->
+    <!-- 2.4.5(i):沙盒 -->
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+    <!-- 唯一出機連線:使用者自己按「下載」時連 huggingface.co 取 Whisper 權重(MAS-15) -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <!-- 你軌:麥克風(系統音訊 process tap 走 TCC 的 NSAudioCaptureUsageDescription,不另需 entitlement;#878 spike／10/28 探針實證) -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+    <!-- 會議前提醒讀行事曆(CAL-03;總開關預設關,開了才請求) -->
+    <key>com.apple.security.personal-information.calendars</key>
+    <true/>
+    <!-- 錄音夾:使用者在 NSOpenPanel 選的資料夾(MAS-06) -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+    <!-- 重啟後還記得那個資料夾:app-scoped security bookmark(MAS-06／07) -->
+    <key>com.apple.security.files.bookmarks.app-scope</key>
+    <true/>
+</dict>
+</plist>

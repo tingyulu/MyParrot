@@ -41,9 +41,16 @@ struct MyParrotApp: App {
             // 否則視窗縮到比內容窄,hosting view 把過寬的內容置中、兩邊被裁掉。窄版／迷你照舊。
             .frame(minWidth: windowMode.mode == .mini ? 300 : WorkspaceView.minimumWindowWidth(uiState, mode: windowMode.mode),
                    minHeight: windowMode.mode == .mini ? 60 : 620)
+            // MAS-17(2.5.14):錄音中 Dock badge「REC」＋選單列狀態項,四種視窗模式(含關窗)都看得到。
+            .onChange(of: controller.state, initial: true) { _, new in RecordingIndicator.update(state: new) }
             .onAppear {
                 appDelegate.controller = controller
                 appDelegate.uiState = uiState
+                // MAS-06／07:啟動後重探一次書籤(stale 重存),沒有可用的錄音夾就跳選擇提示;先處理啟動前就送到的 open 事件
+                //(`open -a MyParrot <資料夾>`／拖到圖示),有給資料夾就不用問。
+                appDelegate.flushPendingOpenURLs()
+                controller.revalidateRecordingsFolder()
+                if controller.needsRecordingsFolder { uiState.showFolderPrompt = true }
                 // #949:標記數進 state.json(GUI 當 owner 時 CLI `status` 看得到)。
                 uiState.onMarkersChanged = { [controller] n in controller.markerCount = n }
                 // #949 REC-36:CLI 送來的 `mark` 指令(Core 沒有標記方法)走 App 的 ⌘⇧M 同一條路。
@@ -55,6 +62,7 @@ struct MyParrotApp: App {
                 // #2407:會議提醒(排程器＋通知)接線;總開關預設關,關著時什麼都不做、零權限請求。
                 ReminderWiring.install(controller: controller)
                 // #949 REC-35:監看 ~/.config/myparrot 與錄音資料夾(CLI 在錄 ⇒ 橫幅;別的進程發布成品 ⇒ 列表自己出現)。
+                // C2(Eric 16:36):協定檔搬進 <錄音夾>/.myparrot ⇒ 商店版也監看(沙盒看得到自己選的夾);沒選夾時先看佔位夾,選完 setDirectories 跟著換。
                 controller.startExternalWatch()
                 // UI-25: 啟動套一次自存模式/frame,之後不再干預使用者拖拉/並排。
                 windowMode.applyInitialFrame()
@@ -63,8 +71,10 @@ struct MyParrotApp: App {
                 DebugControl.install(controller: controller, updates: updates, uiState: uiState, windowMode: windowMode)
                 #endif
             }
-            // UPD:啟動 3 秒後背景查一次更新(避開啟動關鍵路徑/權限請求),失敗靜默。
+            #if !MYPARROT_MAS
+            // UPD:啟動 3 秒後背景查一次更新(避開啟動關鍵路徑/權限請求),失敗靜默。MAS-14:商店版不編。
             .task { try? await Task.sleep(for: .seconds(3)); await updates.autoCheckAtLaunch() }
+            #endif
         }
         .windowResizability(.contentSize)
         // UI-21: 移除 hiddenTitleBar(它把內容拉進標題列、與工具列疊字=Eric 回報的
@@ -89,6 +99,10 @@ struct MyParrotApp: App {
 @Observable
 final class AppUIState {
     var showSettings = false
+    /// MAS-06／07:商店版「選擇錄音資料夾」提示框(RootView 的 alert;DebugControl `folder-prompt` 也能叫出／收掉)。
+    var showFolderPrompt = false
+    /// MAS-31:首啟模型下載卡片(RootView 的 alert;選完錄音夾之後、沒裝模型時跳一次)。
+    var showOnboarding = false
     /// UI-57:首次啟動模型功能說明框(RootView 的 alert;DebugControl `model-hint show` 也能叫出來)。
     var showModelHint = false
     /// 設定頁打開後要捲到的區段 id(`SettingsView.modelSectionID`);SettingsView 捲完清回 nil。
@@ -223,7 +237,7 @@ struct AppCommands: Commands {
                 .keyboardShortcut(",", modifiers: .command)
         }
         CommandMenu(L("錄音")) {
-            Button(L("開始錄音")) { controller.startRecording() }
+            Button(L("開始錄音")) { RecordingConsent.confirmThen { controller.startRecording() } }   // MAS-17
                 .keyboardShortcut("r", modifiers: .command)
                 // #949:CLI 在錄(別的進程持有租約)⇒ 停用(按了也只會拿到「已有錄音進行中」)。
                 .disabled(!(controller.state == .idle || controller.state == .finished) || uiState.showSettings
@@ -351,6 +365,30 @@ extension AppCommands {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var controller: RecordingController?
     var uiState: AppUIState?
+    /// MAS-06b:controller 還沒接上前就送到的 open 事件(Launch Services 可能在第一個 view 出現前就送)。
+    private var pendingOpenURLs: [URL] = []
+
+    /// 資料夾拖到 Dock 圖示／Finder「打開檔案的應用程式」／`open -a MyParrot <資料夾>` ⇒ 當作選錄音夾(兩版共用;
+    /// 沙盒版由 Launch Services 給該資料夾的 scope,`setRecordingsDir` 存成書籤)。只收資料夾,其他 URL 忽略。
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard controller != nil else { pendingOpenURLs.append(contentsOf: urls); return }
+        applyOpenURLs(urls)
+    }
+    func flushPendingOpenURLs() {
+        let urls = pendingOpenURLs; pendingOpenURLs = []
+        applyOpenURLs(urls)
+    }
+    private func applyOpenURLs(_ urls: [URL]) {
+        guard let c = controller else { return }
+        for u in urls {
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: u.path, isDirectory: &isDir), isDir.boolValue else { continue }
+            c.setRecordingsDir(u)
+            uiState?.showFolderPrompt = false
+            break
+        }
+    }
+
     /// BUG-27 補強(codex 獨立測試發現):terminateLater pending 期間再收到終止請求
     /// (連按 ⌘Q)若再開一個 unload Task,會對同一 termination 流程 reply 兩次。
     /// 已有流程在收尾(≤5s)時直接取消重複請求,第一個流程照常完成退出。
@@ -366,6 +404,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// AFM-01:使用者可能剛去系統設定開 Apple Intelligence 或改 Siri 語言回來 ⇒ 回前景再探一次。
     func applicationDidBecomeActive(_ notification: Notification) {
         AppleFMAvailability.shared.refresh()
+        // MAS-07:回前景重探書籤(資料夾在背景被搬走／刪掉／權限撤回 ⇒ 按錄音前就提示)。GitHub 版 no-op。
+        if let c = controller {
+            c.revalidateRecordingsFolder()
+            if c.needsRecordingsFolder, uiState?.showSettings != true { uiState?.showFolderPrompt = true }
+        }
     }
 
     /// #949 REC-39(B1):`-backgroundStart` 啟動參數 ⇒ 不開主視窗(第二段 CLI 拉起 GUI 用;第一段只做參數與不開窗)。
@@ -417,6 +460,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         quitInFlight = true
         Task { @MainActor in
             let clean = await c.unloadWhisperForQuit()
+            c.releaseRecordingsFolderAccess()   // MAS-29:security scope start／stop 配對
             if clean {
                 sender.reply(toApplicationShouldTerminate: true)
             } else {

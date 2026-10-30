@@ -13,18 +13,28 @@ extension SelfTest {
         if R.codexCLI.id != CorrectionBackend.codexCLI.rawValue || R.codexCLI.id != "codexCLI" { fails.append("codexCLI id 應＝CorrectionBackend.codexCLI.rawValue＝codexCLI") }
         let order = ids(R.assemble(platformSupportsAFM: true))
         if order.firstIndex(of: "claudeCLI") != 1 || order.firstIndex(of: "codexCLI") != 2 { fails.append("順序應 off/claudeCLI/codexCLI/appleFM,得 \(order)") }
-        for cap in [ModelCapability.correction, .minutes] where !ids(R.backends(for: cap)).contains("codexCLI") { fails.append("\(cap) 應可選 codexCLI") }
-        if !ids(R.backends(for: .translation)).contains("codexCLI") { fails.append("翻譯應列 codexCLI(#2612)") }
+        // MAS-14:`backends(for:)` 讀本建置的 all,商店版沒有 codexCLI;純函式面(assemble)上面已驗。
+        if BuildFlavor.allowsCLIBackends {
+            for cap in [ModelCapability.correction, .minutes] where !ids(R.backends(for: cap)).contains("codexCLI") { fails.append("\(cap) 應可選 codexCLI") }
+            if !ids(R.backends(for: .translation)).contains("codexCLI") { fails.append("翻譯應列 codexCLI(#2612)") }
+        } else if ModelCapability.allCases.contains(where: { ids(R.backends(for: $0)).contains("codexCLI") }) {
+            fails.append("MAS-14:商店版任何能力都不應列 codexCLI")
+        }
         let suite = "MyParrotSelfTest.codex"
         let d = UserDefaults(suiteName: suite)!
         d.removePersistentDomain(forName: suite)
-        if !R.needsPrivacyConfirmation("codexCLI", defaults: d) { fails.append("出機後端第一次應跳隱私框") }
-        R.acceptPrivacy("codexCLI", defaults: d)
-        if R.needsPrivacyConfirmation("codexCLI", defaults: d) { fails.append("同意後不應再問") }
-        if !d.bool(forKey: "privacyAccepted.codexCLI") { fails.append("隱私鍵名應為 privacyAccepted.codexCLI") }
-        if d.bool(forKey: "privacyAccepted.claudeCLI") { fails.append("同意 codex 不該連帶同意 claude") }
-        R.select("codexCLI", for: .minutes, defaults: d)
-        if R.selected(for: .minutes, defaults: d).id != "codexCLI" { fails.append("select/selected 往返錯") }
+        if BuildFlavor.allowsCLIBackends {   // needsPrivacyConfirmation／select 都查本建置的 all;商店版沒有這個後端(MAS-14)
+            if !R.needsPrivacyConfirmation("codexCLI", defaults: d) { fails.append("出機後端第一次應跳隱私框") }
+            R.acceptPrivacy("codexCLI", defaults: d)
+            if R.needsPrivacyConfirmation("codexCLI", defaults: d) { fails.append("同意後不應再問") }
+            if !d.bool(forKey: "privacyAccepted.codexCLI") { fails.append("隱私鍵名應為 privacyAccepted.codexCLI") }
+            if d.bool(forKey: "privacyAccepted.claudeCLI") { fails.append("同意 codex 不該連帶同意 claude") }
+            R.select("codexCLI", for: .minutes, defaults: d)
+            if R.selected(for: .minutes, defaults: d).id != "codexCLI" { fails.append("select/selected 往返錯") }
+        } else {
+            R.select("codexCLI", for: .minutes, defaults: d)
+            if R.selected(for: .minutes, defaults: d).id != "off" { fails.append("MAS-14:商店版 select codexCLI 應 fail closed 成 off") }
+        }
         R.select("appleTranslation", for: .minutes, defaults: d)
         if R.selected(for: .minutes, defaults: d).id != "off" { fails.append("會議記錄選只做翻譯的後端應 fail closed 成 off") }
         d.removePersistentDomain(forName: suite)

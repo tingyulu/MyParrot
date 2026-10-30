@@ -19,9 +19,13 @@ public struct RecordingCommand: Codable, Sendable, Equatable {
 
     /// owner 該不該執行這張指令(純函式):指定了別場 sessionId ⇒ 不是給我的;在本場開錄之前就發出 ⇒ 過期
     /// (例如上一場逾時沒人收的 stop,不能把新的一場停掉)。回傳 nil＝可以執行,否則是拒絕原因。
-    public static func rejection(_ cmd: RecordingCommand, sessionId: String, sessionStartedAt: Date) -> String? {
+    /// C2 二審補:指令檔住在可能被同步的錄音夾,超過 `maxAge`(預設 120 秒)的指令一律當過期(同步延遲／重放)。
+    public static let maxAge: TimeInterval = 120
+    public static func rejection(_ cmd: RecordingCommand, sessionId: String, sessionStartedAt: Date,
+                                 now: Date = Date(), maxAge: TimeInterval = maxAge) -> String? {
         if let target = cmd.args["sessionId"], !target.isEmpty, target != sessionId { return "不是這一場的指令(\(target))" }
         if let issued = ISO8601.date(cmd.issuedAt), issued < sessionStartedAt.addingTimeInterval(-1) { return "指令早於本場開錄,已過期" }
+        if let issued = ISO8601.date(cmd.issuedAt), now.timeIntervalSince(issued) > maxAge { return "指令超過 \(Int(maxAge)) 秒,已過期" }
         if !supported.contains(cmd.cmd) { return "不支援的指令:\(cmd.cmd)" }
         return nil
     }
@@ -36,8 +40,9 @@ public struct RecordingCommandResult: Codable, Sendable, Equatable {
 
 public enum RecordingCommandStore {
     /// `~/.config/myparrot/commands`(`MYPARROT_CONFIG_DIR` 覆寫)。
+    /// C2(#2646):`<錄音夾>/.myparrot/commands/`(之前在 ~/.config/myparrot/commands)。
     public static func directory() -> URL {
-        MyParrotPaths.configDir.appendingPathComponent("commands", isDirectory: true)
+        MyParrotPaths.protocolDir.appendingPathComponent("commands", isDirectory: true)
     }
 
     static func url(_ requestId: String, _ ext: String, in dir: URL) -> URL {

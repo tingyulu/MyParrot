@@ -5,17 +5,105 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-CONFIG="${1:-debug}"   # 預設 debug(快);交付才用 release
+MODE="${1:-debug}"   # debug | release | mas-dev | mas-dist | verify-mas <app>
+# #2646 Mac App Store 免費版(TEST_PLAN X 節 MAS-04／24／25／34):
+#   mas-dev  ＝ MYPARROT_MAS=1 build(預設 debug,MYPARROT_MAS_CONFIG=release 可改)→ bundle id tw.uncle.MyParrot.mas
+#              → 沙盒 entitlements → Apple Development 簽 → 裝到 ~/Applications/MyParrot-mas.app(🚫 永遠不碰現用的 MyParrot.app)。
+#              功能測試用;debug 才有 DebugControl(myparrotctl)通道,沙盒下結果檔要寫在已選的錄音夾裡。
+#   mas-dist ＝ 同上但 Apple Distribution 簽,不安裝;productbuild 出 .pkg(Mac Installer Distribution 簽)→ 可 altool validate。
+#   verify-mas <app> ＝ 只跑 MAS-34 的簽章一致性檢查(Team ID／bundle id／六條 entitlements／六條用途字串),正控用。
+#   debug／release ＝ GitHub 版,行為一行不變。MAS 兩種模式的 swift build 走獨立 scratch path .build-mas(兩套快取互不洗)。
+FLAVOR=github; MAS_SIGN=""
+case "$MODE" in
+  debug|release) CONFIG="$MODE" ;;
+  mas-dev)  CONFIG="${MYPARROT_MAS_CONFIG:-debug}"; FLAVOR=mas; MAS_SIGN=dev ;;   # 預設 debug:才有 DebugControl 通道可驗(MAS-24 偏差,見 TEST_REPORT);MYPARROT_MAS_CONFIG=release 可改
+  mas-dist) CONFIG=release; FLAVOR=mas; MAS_SIGN=dist ;;
+  verify-mas) ;;
+  *) echo "用法: scripts/build-app.sh [debug|release|mas-dev|mas-dist|verify-mas <app>]"; exit 1 ;;
+esac
 
-echo "▶ swift build -c $CONFIG"
-swift build -c "$CONFIG"
+# --- MAS-34:簽章一致性檢查(mas-dev／mas-dist 簽完必跑;任一不符 exit 1、mas-dist 不產 pkg) ---------------
+# 期望值:bundle id＝tw.uncle.MyParrot.mas(Info.plist 與簽章 Identifier 都是)、Team ID＝簽章憑證的 OU、
+# entitlements 恰好六條且全 true、六條 TCC 用途字串非空、ITSAppUsesNonExemptEncryption=false、PrivacyInfo.xcprivacy 在。
+MAS_BUNDLE_ID="tw.uncle.MyParrot.mas"
+MAS_ENTITLEMENT_KEYS="com.apple.security.app-sandbox com.apple.security.network.client com.apple.security.device.audio-input com.apple.security.personal-information.calendars com.apple.security.files.user-selected.read-write com.apple.security.files.bookmarks.app-scope"
+MAS_USAGE_KEYS="NSMicrophoneUsageDescription NSAudioCaptureUsageDescription NSCalendarsFullAccessUsageDescription NSCalendarsUsageDescription NSSpeechRecognitionUsageDescription NSUserNotificationsUsageDescription"
+verify_mas_signature() {
+  local app="$1" fail=0 plist="$1/Contents/Info.plist" ent
+  ent="$(mktemp -t myparrot-ent).plist"
+  echo "▶ MAS-34 簽章一致性檢查:$app"
+  # 1. 簽章本體:Identifier／TeamIdentifier
+  local dvv; dvv="$(codesign -dvv "$app" 2>&1 || true)"
+  local sig_id team; sig_id="$(printf '%s\n' "$dvv" | sed -n 's/^Identifier=//p' | head -1)"; team="$(printf '%s\n' "$dvv" | sed -n 's/^TeamIdentifier=//p' | head -1)"
+  [ "$sig_id" = "$MAS_BUNDLE_ID" ] || { echo "  ❌ 簽章 Identifier=$sig_id,應為 $MAS_BUNDLE_ID"; fail=1; }
+  if [ -z "$team" ] || [ "$team" = "not set" ]; then echo "  ❌ 簽章沒有 TeamIdentifier(ad-hoc／自簽?)"; fail=1; fi
+  # Team ID 要等於簽章憑證的 OU(Apple Development／Apple Distribution／Developer ID 同一個團隊都是同一個 OU)
+  local authority cert_ou
+  authority="$(printf '%s\n' "$dvv" | sed -n 's/^Authority=//p' | head -1)"
+  cert_ou="$(security find-certificate -c "$authority" -p 2>/dev/null | openssl x509 -noout -subject 2>/dev/null | sed -n 's/.*OU *= *\([A-Z0-9]*\).*/\1/p')"
+  if [ -n "$cert_ou" ] && [ "$cert_ou" != "$team" ]; then echo "  ❌ 簽章 TeamIdentifier=$team 與憑證 OU=$cert_ou 不符"; fail=1; fi
+  # 2. Info.plist
+  local plist_id; plist_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist" 2>/dev/null || true)"
+  [ "$plist_id" = "$MAS_BUNDLE_ID" ] || { echo "  ❌ Info.plist CFBundleIdentifier=$plist_id,應為 $MAS_BUNDLE_ID"; fail=1; }
+  local enc; enc="$(/usr/libexec/PlistBuddy -c 'Print :ITSAppUsesNonExemptEncryption' "$plist" 2>/dev/null || echo missing)"
+  [ "$enc" = "false" ] || { echo "  ❌ ITSAppUsesNonExemptEncryption=$enc,應為 false"; fail=1; }
+  for k in $MAS_USAGE_KEYS; do
+    local v; v="$(/usr/libexec/PlistBuddy -c "Print :$k" "$plist" 2>/dev/null || true)"
+    [ -n "$v" ] || { echo "  ❌ 用途字串 $k 缺或為空"; fail=1; }
+  done
+  [ -f "$app/Contents/Resources/PrivacyInfo.xcprivacy" ] || { echo "  ❌ 缺 Resources/PrivacyInfo.xcprivacy"; fail=1; }
+  # 3. entitlements:從最終簽章讀回(不是讀來源檔),恰好六條、全 true
+  if ! codesign -d --entitlements "$ent" --xml "$app" 2>/dev/null; then echo "  ❌ 讀不到簽章 entitlements"; fail=1; fi
+  if [ -s "$ent" ]; then
+    local n; n="$(/usr/libexec/PlistBuddy -c 'Print' "$ent" 2>/dev/null | grep -c ' = ' || true)"
+    [ "$n" = "6" ] || { echo "  ❌ 簽章 entitlements 有 $n 條,應恰好 6 條"; fail=1; }
+    for k in $MAS_ENTITLEMENT_KEYS; do
+      local v; v="$(/usr/libexec/PlistBuddy -c "Print :$k" "$ent" 2>/dev/null || echo missing)"
+      [ "$v" = "true" ] || { echo "  ❌ entitlement $k=$v,應為 true"; fail=1; }
+    done
+  fi
+  rm -f "$ent"
+  if [ "$fail" = 0 ]; then
+    echo "  ✅ Identifier=$sig_id TeamIdentifier=$team(憑證 OU 相符)、六條 entitlements、六條用途字串、加密宣告、privacy manifest 全部一致"
+  else
+    echo "  ❌ MAS-34 檢查不通過"
+  fi
+  return $fail
+}
+if [ "$MODE" = verify-mas ]; then
+  [ -d "${2:-}" ] || { echo "用法: scripts/build-app.sh verify-mas <MyParrot-mas.app 路徑>"; exit 1; }
+  verify_mas_signature "$2"; exit $?
+fi
+
+if [ "$FLAVOR" = mas ]; then
+  export MYPARROT_MAS=1
+  SCRATCH=(--scratch-path .build-mas)
+  echo "▶ MYPARROT_MAS=1 swift build -c $CONFIG --scratch-path .build-mas(商店版)"
+else
+  SCRATCH=()
+  echo "▶ swift build -c $CONFIG"
+fi
+swift build -c "$CONFIG" ${SCRATCH[@]+"${SCRATCH[@]}"}
 
 # Guard: every L("…") key must have a translation (non-fatal, but surfaced).
 echo "▶ check translations"
-swift scripts/check-translations.swift Sources/MyParrot || echo "⚠️ 有 key 缺翻譯(見上),不阻擋打包"
+if ! swift scripts/check-translations.swift Sources/MyParrot; then
+  # 二審:商店版缺字串／缺 lproj 一律擋(MAS-28「缺一即紅」);GitHub 版維持只警告。
+  if [ "${FLAVOR:-github}" = mas ]; then echo "❌ 商店版翻譯檢查不過,不打包"; exit 1; fi
+  echo "⚠️ 有 key 缺翻譯(見上),不阻擋打包"
+fi
 
-APP="MyParrot.app"
-BIN=".build/$CONFIG/MyParrot"
+if [ "$FLAVOR" = mas ]; then
+  BIN=".build-mas/$CONFIG/MyParrot"
+  # mas-dev 在 repo 根暫存成 MyParrot-mas.app(跟 GitHub 版的暫存 MyParrot.app 分開);
+  # mas-dist 暫存在 dist/mas/MyParrot.app(商店安裝到 /Applications 時就叫 MyParrot.app,.pkg 的 component 要用這個名字)。
+  if [ "$MAS_SIGN" = dist ]; then mkdir -p dist/mas; APP="dist/mas/MyParrot.app"; else APP="MyParrot-mas.app"; fi
+  ENTITLEMENTS="Resources/MyParrot-mas.entitlements"
+else
+  APP="MyParrot.app"
+  BIN=".build/$CONFIG/MyParrot"
+  ENTITLEMENTS="Resources/MyParrot.entitlements"
+fi
 
 # Regenerate the app icon if missing.
 if [ ! -f Resources/AppIcon.icns ]; then
@@ -29,6 +117,15 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/MyParrot"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+# MAS-27:privacy manifest 兩版都嵌(內容＝docs/PRIVACY.md;不追蹤、不收集)。
+cp Resources/PrivacyInfo.xcprivacy "$APP/Contents/Resources/PrivacyInfo.xcprivacy"
+if [ "$FLAVOR" = mas ]; then
+  # MAS-04:商店版 bundle id(Eric 2026-10-29 B1)、顯示名維持 MyParrot、加密宣告(不含非豁免加密 ⇒ 免出口文件)。
+  # 來源 Resources/Info.plist 不動(GitHub 版零回歸),只改這份複本。
+  /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $MAS_BUNDLE_ID" "$APP/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Add :ITSAppUsesNonExemptEncryption bool false" "$APP/Contents/Info.plist"
+  echo "▶ MAS Info.plist 補丁:CFBundleIdentifier=$MAS_BUNDLE_ID、ITSAppUsesNonExemptEncryption=false"
+fi
 
 # UI-32:吉祥物 PNG 幀(idle=閉嘴/sing=張嘴);缺任一檔=用向量 fallback,不阻擋打包。
 # 二審:白名單複製(cp -R 整個目錄會把備份檔/metadata 一起封進正式 bundle)。
@@ -57,6 +154,25 @@ if ls Resources/Fonts/*.ttf >/dev/null 2>&1; then
   cp Resources/Fonts/*.ttf "$APP/Contents/Resources/Fonts/"
   [ -f Resources/Fonts/OFL.txt ] && cp Resources/Fonts/OFL.txt "$APP/Contents/Resources/Fonts/"
   echo "▶ embedded fonts: $(ls Resources/Fonts/*.ttf | xargs -n1 basename | tr '\n' ' ')"
+fi
+# MAS-32(#2646):九語 InfoPlist.strings(TCC 用途字串)打進 Contents/Resources/<lang>.lproj/;缺任一語擋打包。
+LPROJ_COUNT=0
+for d in Resources/lproj/*.lproj; do
+  [ -f "$d/InfoPlist.strings" ] || { echo "❌ $d 缺 InfoPlist.strings"; exit 1; }
+  mkdir -p "$APP/Contents/Resources/$(basename "$d")"
+  cp "$d/InfoPlist.strings" "$APP/Contents/Resources/$(basename "$d")/InfoPlist.strings"
+  LPROJ_COUNT=$((LPROJ_COUNT + 1))
+done
+[ "$LPROJ_COUNT" = 9 ] || { echo "❌ lproj 應有 9 個,得 $LPROJ_COUNT"; exit 1; }
+echo "▶ embedded InfoPlist.strings: $LPROJ_COUNT lproj"
+# MAS-16(#2646):第三方授權全文(whisper.cpp MIT／SwiftyOpenCC MIT／OpenCC Apache-2.0／Share Tech Mono OFL)打進 bundle,
+# 設定頁「第三方授權」展開讀這裡;缺檔擋打包(商店版沒有這些會違反各授權的附帶義務)。
+if ls Resources/Licenses/*.txt >/dev/null 2>&1; then
+  mkdir -p "$APP/Contents/Resources/Licenses"
+  cp Resources/Licenses/*.txt "$APP/Contents/Resources/Licenses/"
+  echo "▶ embedded licenses: $(ls Resources/Licenses/*.txt | wc -l | tr -d ' ') files"
+else
+  echo "❌ Resources/Licenses/*.txt 缺(第三方授權全文)"; exit 1
 fi
 if png_ok Resources/mascot/head.png; then
   mkdir -p "$APP/Contents/Resources/mascot"
@@ -107,7 +223,29 @@ fi
 #   4) the self-signed "MyParrot Dev" (works, but TCC won't persist across builds)
 #   5) ad-hoc
 HARDENED=0
-if [ -n "${CODESIGN_IDENTITY:-}" ]; then
+if [ "$FLAVOR" = mas ]; then
+  # MAS-24／25:功能測試用 Apple Development(同 Team ID、本機開得起來);發行用 Apple Distribution(本機不能直接開,只驗)。
+  # 兩種都要同一個團隊的憑證(OU 相同),MAS-34 會對帳。CODESIGN_IDENTITY 可覆寫。
+  HARDENED=1
+  # 用 SHA-1 指紋而不是名字選憑證:同名的 Apple Development 憑證可能有兩張(Xcode 兩台機器各發一張),
+  # codesign --sign "<名字>" 會回 ambiguous 整個簽不下去(2026-10-29 mas-dev 第一次就撞到)。
+  pick_identity() {   # $1 = CN 前綴的 regex;印出「<40 碼指紋> <名字>」,取第一張
+    security find-identity -v -p codesigning 2>/dev/null \
+      | grep -E "\"($1)[^\"]*\"" | head -1 \
+      | sed -E 's/^ *[0-9]+\) ([0-9A-F]{40}) "(.*)"$/\1 \2/' || true
+  }
+  if [ -n "${CODESIGN_IDENTITY:-}" ]; then
+    SIGN_ID="$CODESIGN_IDENTITY"; echo "▶ codesign with override identity: $SIGN_ID"
+  elif [ "$MAS_SIGN" = dev ]; then
+    HIT="$(pick_identity 'Apple Development')"
+    [ -n "$HIT" ] || { echo "❌ 找不到 Apple Development 憑證(mas-dev 需要)。Xcode → Settings → Accounts → Manage Certificates → + Apple Development"; exit 1; }
+    SIGN_ID="${HIT%% *}"; echo "▶ codesign(商店版·功能測試)with: ${HIT#* }(指紋 ${SIGN_ID:0:8}…)"
+  else
+    HIT="$(pick_identity 'Apple Distribution|3rd Party Mac Developer Application')"
+    [ -n "$HIT" ] || { echo "❌ 找不到 Apple Distribution 憑證(mas-dist 需要)。developer.apple.com → Certificates → + → Apple Distribution,下載雙擊裝進登入鑰匙圈"; exit 1; }
+    SIGN_ID="${HIT%% *}"; echo "▶ codesign(商店版·發行)with: ${HIT#* }(指紋 ${SIGN_ID:0:8}…)"
+  fi
+elif [ -n "${CODESIGN_IDENTITY:-}" ]; then
   SIGN_ID="$CODESIGN_IDENTITY"
   echo "▶ codesign with override identity: $SIGN_ID"
   HARDENED=1
@@ -150,12 +288,44 @@ for attempt in 1 2 3 4 5; do
     codesign --force --sign "$SIGN_ID" "${CODESIGN_OPTS[@]}" "$APP/Contents/Frameworks/whisper.framework" \
       || echo "⚠️ whisper.framework 簽章失敗(attempt $attempt)"
   fi
-  if codesign --force --sign "$SIGN_ID" "${CODESIGN_OPTS[@]}" --entitlements Resources/MyParrot.entitlements "$APP" 2>/dev/null; then
+  if codesign --force --sign "$SIGN_ID" "${CODESIGN_OPTS[@]}" --entitlements "$ENTITLEMENTS" "$APP" 2>/dev/null; then
     signed=1; break
   fi
   sleep 1
 done
 [ "$signed" = 1 ] && echo "▶ codesign OK (attempt $attempt)" || echo "⚠️ codesign 仍失敗(iCloud 競態)— app 仍可跑但簽章可能是舊的"
+
+if [ "$FLAVOR" = mas ]; then
+  [ "$signed" = 1 ] || { echo "❌ 商店版簽章失敗,不繼續"; exit 1; }
+  verify_mas_signature "$APP" || exit 1
+fi
+
+# --- mas-dist:不安裝,出 .pkg(MAS-25) ------------------------------------------
+if [ "$FLAVOR" = mas ] && [ "$MAS_SIGN" = dist ]; then
+  INSTALLER_ID="$(security find-identity -v -p basic 2>/dev/null | grep -oE '"(Mac Installer Distribution|3rd Party Mac Developer Installer)[^"]*"' | head -1 | tr -d '"' || true)"
+  [ -n "$INSTALLER_ID" ] || { echo "❌ 找不到 Mac Installer Distribution 憑證(.pkg 簽章需要)。developer.apple.com → Certificates → + → Mac Installer Distribution"; exit 1; }
+  VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
+  BUILD_NO="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist")"
+  PKG="dist/mas/MyParrot-$VERSION-$BUILD_NO-mas.pkg"
+  rm -f "$PKG"
+  echo "▶ productbuild → $PKG(installer 簽:$INSTALLER_ID)"
+  productbuild --component "$APP" /Applications --sign "$INSTALLER_ID" "$PKG"
+  pkgutil --check-signature "$PKG" | sed 's/^/   /'
+  # 10/30：Key ID／Issuer ID 沒在 env 時讀 ~/.private_keys/asc-ids.env（兩行 KEY=VALUE，非秘密；.p8 另放同夾）
+  if [ -z "${MYPARROT_ASC_API_KEY_ID:-}" ] && [ -f "$HOME/.private_keys/asc-ids.env" ]; then
+    set -a; . "$HOME/.private_keys/asc-ids.env"; set +a
+  fi
+  if [ -n "${MYPARROT_ASC_API_KEY_ID:-}" ] && [ -n "${MYPARROT_ASC_API_ISSUER_ID:-}" ]; then
+    echo "▶ xcrun altool --validate-app(App Store Connect API key $MYPARROT_ASC_API_KEY_ID;.p8 放 ~/.private_keys/)"
+    xcrun altool --validate-app -f "$PKG" -t macos --apiKey "$MYPARROT_ASC_API_KEY_ID" --apiIssuer "$MYPARROT_ASC_API_ISSUER_ID"
+    echo "✅ 商店版 .pkg 已產出並通過 altool validate:$PKG(本機不會安裝;Apple Distribution 簽的 app 本機直接開會被 Gatekeeper 擋,是預期的)"
+  else
+    echo "⚠️ 商店版 .pkg 已產出但**未經 altool 驗證**(未設 MYPARROT_ASC_API_KEY_ID／MYPARROT_ASC_API_ISSUER_ID):$PKG"
+    echo "   驗證:xcrun altool --validate-app -f \"$PKG\" -t macos --apiKey <KEY_ID> --apiIssuer <ISSUER_ID>"
+    echo "   上傳:xcrun altool --upload-package … 或把 .pkg 拖進 Transporter.app"
+  fi
+  exit 0
+fi
 
 # --- Install to ~/Applications (non-iCloud) so the signature stays valid ------
 # Running from the iCloud project dir lets iCloud re-break the signature; copying
@@ -169,7 +339,11 @@ DEST_DIR="${DEST_DIR%/}"
 if [ -z "$DEST_DIR" ] || [ "$DEST_DIR" = "$(pwd)" ] || [ "$DEST_DIR" = "/" ] || [ "$DEST_DIR" = "$HOME" ]; then
   echo "MYPARROT_DEST_DIR 不可指到 /、家目錄或 repo 根:$DEST_DIR"; exit 1
 fi
-DEST="$DEST_DIR/$APP"
+DEST="$DEST_DIR/$(basename "$APP")"
+if [ "$FLAVOR" = mas ]; then
+  # MAS-24 鐵則:商店版測試 build 只能叫 MyParrot-mas.app,🚫 絕不覆蓋 Eric 現用的 MyParrot.app。
+  [ "$(basename "$DEST")" = "MyParrot-mas.app" ] || { echo "❌ 商店版安裝名必須是 MyParrot-mas.app,得 $DEST"; exit 1; }
+fi
 mkdir -p "$DEST_DIR"
 rm -rf "$DEST"
 cp -R "$APP" "$DEST"
@@ -180,7 +354,7 @@ else
   echo "▶ 已安裝到 $DEST(strict 驗證未過,但可執行)"
 fi
 
-echo "✅ Built & installed MyParrot.app"
+echo "✅ Built & installed $(basename "$APP")"
 echo "   執行(建議從這裡開,權限才記得住):  open \"$DEST\""
 echo "   ⚠️ 換新版前先 Cmd+Q 完全關掉舊的,否則 open 只會把舊實例叫到前面。"
 echo "   首次啟動只會要 麥克風 + 語音辨識 + 系統音訊擷取(不要螢幕錄影)。"

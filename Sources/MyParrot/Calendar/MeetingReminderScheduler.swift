@@ -205,8 +205,8 @@ final class MeetingReminderScheduler {
     }
 
     private func runExternalCommand(for r: PlannedReminder) {
-        let cmd = settings.externalCommand.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cmd.isEmpty else { return }
+        // MAS-14:商店版忽略外部指令(設定頁也不出現這欄);判斷在 ExternalNotifyCommand.effective(純函式,SelfTest 守)。
+        guard let cmd = ExternalNotifyCommand.effective(settings.externalCommand, allowed: BuildFlavor.allowsExternalCommand) else { return }
         let env = ExternalNotifyCommand.environment(title: r.event.title, start: r.event.start, local: .current)
         Task.detached(priority: .utility) {
             let out = ExternalNotifyCommand.run(cmd, environment: env)

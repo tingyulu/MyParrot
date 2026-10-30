@@ -32,11 +32,13 @@ struct CalendarReminderSettingsSection: View {
                         value: Binding(get: { reminders.settings.leadMinutes },
                                        set: { v in reminders.update { $0.leadMinutes = v } }),
                         in: 1...30)
-                TextField(L("外部通知指令(選填)"), text: $commandText)
-                    .font(MPFont.caption)
-                    .onChange(of: commandText) { _, new in reminders.update { $0.externalCommand = new } }
-                Text(L("到點時用 /bin/sh 執行這一行;環境變數 MYPARROT_EVENT_TITLE、MYPARROT_START_ISO、MYPARROT_START_LOCAL、MYPARROT_START_TAIPEI 帶會議資料。"))
-                    .font(MPFont.caption).foregroundStyle(.tertiary).lineSpacing(3)
+                if BuildFlavor.allowsExternalCommand {   // MAS-14:商店版沒有這欄(排程器那端也不會跑)
+                    TextField(L("外部通知指令(選填)"), text: $commandText)
+                        .font(MPFont.caption)
+                        .onChange(of: commandText) { _, new in reminders.update { $0.externalCommand = new } }
+                    Text(L("到點時用 /bin/sh 執行這一行;環境變數 MYPARROT_EVENT_TITLE、MYPARROT_START_ISO、MYPARROT_START_LOCAL、MYPARROT_START_TAIPEI 帶會議資料。"))
+                        .font(MPFont.caption).foregroundStyle(.tertiary).lineSpacing(3)
+                }
                 LabeledContent(L("上次讀取")) {
                     Text(reminders.lastRefreshAt.map { ReminderWiring.dualTime($0, includeDate: true) } ?? L("尚未讀取"))
                         .foregroundStyle(.secondary)

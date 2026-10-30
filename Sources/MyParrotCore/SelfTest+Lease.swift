@@ -417,3 +417,51 @@ extension SelfTest {
         } catch { return false }
     }
 }
+
+// MARK: - C2(#2646,Eric 2026-10-29 16:36):協定檔搬進 <錄音夾>/.myparrot
+
+extension SelfTest {
+    /// REC-40:協定目錄＝`<錄音夾>/.myparrot`;不同錄音夾的租約互不可見、同一夾可見;state.json／commands 也在那。
+    static func protocolDirRules() -> Result {
+        var fails: [String] = []
+        withScratchDir("c2") { root in
+            let a = root.appendingPathComponent("A", isDirectory: true), b = root.appendingPathComponent("B", isDirectory: true)
+            if MyParrotPaths.protocolDir(for: a).path != a.appendingPathComponent(".myparrot").path { fails.append("protocolDir 應為 <夾>/.myparrot") }
+            let lease = RecordingLease.make(sessionId: "s-a", owner: "gui", name: "x", audioPath: "/tmp/x.caf")
+            guard case .success(let holder) = RecordingLeaseHolder.acquire(lease, in: MyParrotPaths.protocolDir(for: a)) else {
+                fails.append("A 夾取租約失敗"); return
+            }
+            if case .alive = RecordingLeaseHolder.inspect(in: MyParrotPaths.protocolDir(for: b)) { fails.append("B 夾不該看到 A 夾的租約") }
+            if case .alive(let l) = RecordingLeaseHolder.inspect(in: MyParrotPaths.protocolDir(for: a)) {
+                if l.sessionId != "s-a" { fails.append("A 夾租約 sessionId 不符") }
+            } else { fails.append("A 夾應看到活租約") }
+            // 同一個進程換錄音夾 ⇒ currentRecordingsDir 跟著換,預設目錄就跟著換
+            let before = MyParrotPaths.currentRecordingsDir
+            MyParrotPaths.currentRecordingsDir = b
+            if RecordingLeaseHolder.directory().path != MyParrotPaths.protocolDir(for: b).path { fails.append("directory() 應跟 currentRecordingsDir 走") }
+            if RecordingCommandStore.directory().path != MyParrotPaths.protocolDir(for: b).appendingPathComponent("commands").path { fails.append("commands 應在 <夾>/.myparrot/commands") }
+            if RecordingStateStore.statePath.path != MyParrotPaths.protocolDir(for: b).appendingPathComponent("state.json").path { fails.append("state.json 應在 <夾>/.myparrot") }
+            if !RecordingStateStore.pidfilePath.path.hasSuffix("record.pid") || RecordingStateStore.pidfilePath.path.contains(b.path) { fails.append("record.pid 應留在 configDir(舊版相容)") }
+            MyParrotPaths.currentRecordingsDir = before
+            holder.release()
+        }
+        return Result(name: "REC-40 協定檔在 <錄音夾>/.myparrot", passed: fails.isEmpty,
+                      detail: fails.isEmpty ? "A/B 兩夾互不可見;directory/commands/state 跟錄音夾走;record.pid 留 configDir" : fails.joined(separator: ";"))
+    }
+
+    /// REC-41:舊位置(~/.config/myparrot)的活租約仍被當外部錄音(10/20 版 CLI 相容);新位置有活租約優先;都死 ⇒ 回新位置的結果。
+    static func legacyLeaseFallback() -> Result {
+        var fails: [String] = []
+        let C = RecordingController.self
+        let newL = RecordingLease.make(sessionId: "new", owner: "cli", name: "n", audioPath: "/tmp/n.caf")
+        let oldL = RecordingLease.make(sessionId: "old", owner: "cli", name: "o", audioPath: "/tmp/o.caf")
+        func sid(_ i: LeaseInspection) -> String? { if case .alive(let l) = i { return l.sessionId }; return nil }
+        if sid(C.effectiveInspection(primary: .alive(newL), legacy: .alive(oldL))) != "new" { fails.append("兩邊都活應取新位置") }
+        if sid(C.effectiveInspection(primary: .none, legacy: .alive(oldL))) != "old" { fails.append("新位置沒有、舊位置活著應取舊位置(正控)") }
+        if sid(C.effectiveInspection(primary: .dead(newL), legacy: .alive(oldL))) != "old" { fails.append("新位置死、舊位置活應取舊位置") }
+        if case .dead = C.effectiveInspection(primary: .dead(newL), legacy: .none) {} else { fails.append("都沒活應回新位置的 dead") }
+        if case .none = C.effectiveInspection(primary: .none, legacy: .none) {} else { fails.append("都沒有應回 none") }
+        return Result(name: "REC-41 舊位置租約相容", passed: fails.isEmpty,
+                      detail: fails.isEmpty ? "新活>舊活>新 dead/none 五組" : fails.joined(separator: ";"))
+    }
+}

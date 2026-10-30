@@ -113,4 +113,12 @@ struct SelfTestCases {
     @Test("REC-32 收割判定表") func reapDecisionTable() { check(SelfTest.reapDecisionTable()) }
     @Test("REC-33 太短進隔離區不刪") func quarantineInsteadOfDelete() { check(SelfTest.quarantineInsteadOfDelete()) }
     @Test("REC-36 指令檔生命週期") func commandLifecycle() { check(SelfTest.commandLifecycle()) }
+    @Test("REC-40 協定檔在 <錄音夾>/.myparrot") func protocolDirRules() { check(SelfTest.protocolDirRules()) }
+    @Test("REC-41 舊位置租約相容") func legacyLeaseFallback() { check(SelfTest.legacyLeaseFallback()) }
+    // #2646 MAS-08:商店版純函式(案例在 SelfTest+MAS.swift;`MYPARROT_MAS=1 swift test` 也要綠)
+    @Test("MAS-01 建置旗標對帳") func masBuildFlavor() { check(SelfTest.masBuildFlavor()) }
+    @Test("MAS-07 書籤狀態機") func masBookmarkStateMachine() { check(SelfTest.masBookmarkStateMachine()) }
+    @Test("MAS-14 登錄表不列 CLI 後端") func masRegistryWithoutCLI() { check(SelfTest.masRegistryWithoutCLI()) }
+    @Test("MAS-14 外部指令在商店版忽略") func masExternalCommandIgnored() { check(SelfTest.masExternalCommandIgnored()) }
+    @Test("MAS-12 模型 SHA-256 閘") func whisperChecksumGate() { check(SelfTest.whisperChecksumGate()) }
 }

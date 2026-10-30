@@ -75,6 +75,12 @@ extension RecordingController {
     func beginLease(sessionId sid: String, name: String, audioURL: URL) -> Bool {
         lastLeaseError = nil
         let lease = RecordingLease.make(sessionId: sid, owner: leaseOwner, name: name, audioPath: audioURL.path)
+        // C2 相容:10/20 版 CLI 的租約還在 ~/.config/myparrot(舊位置);它活著就一樣不開第二份。
+        if case .alive(let legacy) = RecordingLeaseHolder.inspect(in: MyParrotPaths.configDir), legacy.sessionId != sid {
+            lastLeaseError = .held(legacy)
+            lastError = Self.leaseFailureMessage(.held(legacy))
+            return false
+        }
         switch RecordingLeaseHolder.acquire(lease) {
         case .failure(let e):
             lastLeaseError = e
@@ -229,12 +235,18 @@ extension RecordingController {
     /// App 啟動時呼叫(CLI 不用):監看 `~/.config/myparrot/` 與錄音資料夾,事件或 2 秒保底 ⇒ `refreshExternal()`。
     public func startExternalWatch() {
         guard externalWatcher == nil else { return }
-        let w = ExternalRecordingWatcher(directories: [MyParrotPaths.configDir, recordingsDir]) { [weak self] in
+        // C2:監看 <錄音夾>/.myparrot(租約/state/commands)與錄音夾頂層;舊位置 ~/.config/myparrot 也看著(10/20 版 CLI 相容)。
+        let w = ExternalRecordingWatcher(directories: Self.watchDirectories(for: recordingsDir)) { [weak self] in
             Task { @MainActor in self?.refreshExternal() }
         }
         externalWatcher = w
         w.start()
         refreshExternal()
+    }
+
+    /// C2 唯一一處決定「監看哪些目錄」:夾內協定目錄、錄音夾頂層、舊位置(10/20 版 CLI 相容)。start／換夾／重探都用它。
+    nonisolated static func watchDirectories(for dir: URL) -> [URL] {
+        [MyParrotPaths.protocolDir(for: dir), dir, MyParrotPaths.configDir]
     }
 
     public func stopExternalWatch() {
@@ -246,7 +258,11 @@ extension RecordingController {
     public func refreshExternal(now: Date = Date()) {
         let selfSession = leaseHolder != nil ? sessionId : nil
         let legacyPID = (leaseHolder == nil) ? RecordingStateStore.activePID() : nil
-        let next = Self.computeExternal(inspection: RecordingLeaseHolder.inspect(), state: RecordingStateStore.read(),
+        // C2:先看新位置(<錄音夾>/.myparrot),沒有活租約再看舊位置(~/.config/myparrot,10/20 版 CLI);state.json 同理。
+        let inspection = Self.effectiveInspection(primary: RecordingLeaseHolder.inspect(),
+                                                  legacy: RecordingLeaseHolder.inspect(in: MyParrotPaths.configDir))
+        let state = RecordingStateStore.read() ?? RecordingStateStore.read(in: MyParrotPaths.configDir)
+        let next = Self.computeExternal(inspection: inspection, state: state,
                                         legacyPID: legacyPID, selfSessionId: selfSession, now: now)
         let ended = externalRecording != nil && next == nil
         if next != externalRecording { externalRecording = next }
@@ -257,6 +273,13 @@ extension RecordingController {
             recordingsDirSignature = sig
             loadRecordings()
         }
+    }
+
+    /// C2 純函式:新位置有活租約就用它;否則舊位置有活租約就用舊的;都沒有 ⇒ 新位置的結果(dead／none 由收割端判)。
+    nonisolated static func effectiveInspection(primary: LeaseInspection, legacy: LeaseInspection) -> LeaseInspection {
+        if case .alive = primary { return primary }
+        if case .alive = legacy { return legacy }
+        return primary
     }
 
     /// 純函式:租約/state.json/舊版 pidfile ⇒ 該不該顯示「別人在錄」。

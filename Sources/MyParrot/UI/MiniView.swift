@@ -33,7 +33,7 @@ struct MiniView: View {
                 iconBtn("play", label: L("繼續"), shortcut: "⌘P") { controller.resume() }
                 iconBtn("stop", label: L("結束"), shortcut: "⌘E") { controller.stop() }
             default:
-                iconBtn("record.circle", label: L("開始錄音"), shortcut: "⌘R") { controller.startRecording() }
+                iconBtn("record.circle", label: L("開始錄音"), shortcut: "⌘R") { RecordingConsent.confirmThen { controller.startRecording() } }   // MAS-17
                     .disabled(controller.externalRecording != nil)   // #949:CLI 在錄就不開第二份
             }
             // v0.3.0 二審:錄音/暫停中也能按「新錄音」→ 與選單 finished-only 規則不一致。

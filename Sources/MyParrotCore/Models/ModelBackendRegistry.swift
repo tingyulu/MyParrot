@@ -51,12 +51,15 @@ public enum ModelBackendRegistry {
                                                    capabilities: [.correction, .minutes, .translation], isLocal: true, debugOnly: true)
     #endif
 
-    /// 登錄表全部後端(順序＝設定頁選單順序)。
-    public static let all: [ModelBackendInfo] = assemble(platformSupportsAFM: AFMAvailability.isPlatformSupported)
+    /// 登錄表全部後端(順序＝設定頁選單順序)。MAS-14:商店版不列兩個 CLI 後端(`BuildFlavor.allowsCLIBackends`)。
+    public static let all: [ModelBackendInfo] = assemble(platformSupportsAFM: AFMAvailability.isPlatformSupported,
+                                                         includeCLIBackends: BuildFlavor.allowsCLIBackends)
 
-    /// 純函式(可測):依「這台 OS 有沒有 FoundationModels」決定 appleFM 進不進表;DEBUG 才有 localFake。
-    public static func assemble(platformSupportsAFM: Bool) -> [ModelBackendInfo] {
-        var list = [off, claudeCLI, codexCLI]
+    /// 純函式(可測):依「這台 OS 有沒有 FoundationModels」決定 appleFM 進不進表;`includeCLIBackends == false`
+    /// (商店版)不列 Claude CLI／Codex CLI;DEBUG 才有 localFake。
+    public static func assemble(platformSupportsAFM: Bool, includeCLIBackends: Bool = true) -> [ModelBackendInfo] {
+        var list = [off]
+        if includeCLIBackends { list += [claudeCLI, codexCLI] }
         if platformSupportsAFM { list.append(appleFM) }
         list.append(appleTranslation)   // #2612
         #if DEBUG
@@ -89,8 +92,14 @@ public enum ModelBackendRegistry {
 
     /// 目前選的後端:鍵不存在＝off;值不在 `backends(for:)` 內(不認得／不支援這個能力／本建置不提供)＝off。
     public static func selected(for cap: ModelCapability, defaults: UserDefaults = .standard) -> ModelBackendInfo {
-        guard let raw = defaults.string(forKey: defaultsKey(for: cap)),
-              let hit = backends(for: cap).first(where: { $0.id == raw }) else { return off }
+        resolve(defaults.string(forKey: defaultsKey(for: cap)), in: all, for: cap, includeDebugOnly: includesDebugOnly)
+    }
+
+    /// 純函式(MAS-14 可測):偏好的原始值 ＋ 本建置的登錄表 ⇒ 後端。鍵不存在／值不在表內／表內那個不支援此能力 ⇒ off。
+    /// 商店版舊偏好若指到 CLI 後端(GitHub 版留下的),表裡沒有 ⇒ off、不崩、功能不出現。
+    public static func resolve(_ raw: String?, in list: [ModelBackendInfo], for cap: ModelCapability,
+                               includeDebugOnly: Bool) -> ModelBackendInfo {
+        guard let raw, let hit = filter(list, for: cap, includeDebugOnly: includeDebugOnly).first(where: { $0.id == raw }) else { return off }
         return hit
     }
 

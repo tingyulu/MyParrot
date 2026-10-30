@@ -86,6 +86,7 @@
 - **Transcribe past recordings** → `.txt` + timestamped, speaker-prefixed `.srt`, with automatic simplified→traditional Chinese normalization on Whisper output
 - **Offline echo cancellation** (optional, non-destructive — writes `*_aec.m4a`, never touches the original)
 - Auto CAF→m4a conversion, quit-protection while recording, floating mini mode, input-gain with soft limiter
+- **Recordings folder** is yours to pick — Settings → Choose…, or drag a folder onto the Dock icon (`open -a MyParrot <folder>` works too)
 - UI in English / 繁體中文 / 简体中文 / 日本語 / 한국어
 - A build stamp in the footer, so you always know exactly which build you're running
 - **Privacy**: offline by default. The network is used only for the optional update check (GitHub Releases), Whisper model downloads you start yourself, and — **only if you enable the Claude CLI or Codex CLI backend** — meeting-minutes / correction / translation requests sent through your local `claude` / `codex` command to Anthropic / OpenAI (what gets sent is the transcript and your notes; a notice explains this before you can turn it on). The Apple on-device model and Apple Translate backends never leave the Mac. Calendar reminders (off by default) need Calendar and Notifications permission
@@ -159,8 +160,8 @@ A `transcribe` hook can **replace** the built-in transcription (bring your own A
 | iPhone Continuity mic | 1.5–2 s to switch (device start-up time) |
 | Capture gaps shorter than 0.3 s | Not silence-padded (trade-off that eliminates padding clicks); the track may shift ≤0.3 s early in that window |
 | Echo cancellation | Offline post-process only, off by default |
-| GUI and CLI recording at the same time | A global lease allows one writer at a time; verified with synthetic writers, not yet with two real microphone recordings |
-| 日本語 / 한국어 UI strings | Machine-assisted, not yet reviewed by native speakers |
+| GUI and CLI recording at the same time | A lease in `<recordings folder>/.myparrot/` allows one writer per folder at a time (GUI, CLI and the Mac App Store build coordinate through the shared folder); while recording, small status files are written there every second, so a synced folder (Google Drive / iCloud) will see them. Verified with synthetic writers, not yet with two real microphone recordings |
+| 日本語 / 한국어 / Español / Deutsch / Français / Português (BR) UI strings | Machine-assisted, not yet reviewed by native speakers |
 
 ## Legal
 

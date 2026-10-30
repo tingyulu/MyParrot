@@ -20,6 +20,16 @@
 //   myparrotctl appearance light|dark|system /tmp/r.json  App 內覆寫外觀(UI-55 截圖;不寫偏好),system＝還原
 //   myparrotctl appearance set light|dark|system /tmp/r.json ; appearance get /tmp/r.json   UI-56:寫偏好 appearanceMode 並套用／讀回
 //   myparrotctl model-hint status|reset|show|open|later /tmp/r.json   UI-57 首次模型提示(reset＝下次啟動再跳;open/later＝按兩顆鈕)
+//   #2646 商店版(沙盒;結果檔要放在 app 寫得到的地方,例如已選的錄音夾底下):
+//   myparrotctl folder-prompt status|show|later|revalidate <錄音夾>/_ctl/r.json   MAS-06/07 選錄音夾提示與書籤重探(state 也帶 recordingsFolder、sandbox)
+//   myparrotctl sandbox-probe /Users/<你>/Documents/x <錄音夾>/_ctl/r.json      MAS-03 試寫真路徑(沙盒 wrote=false;GitHub 版正控 true)
+//   myparrotctl whisper list|download <id>|delete <id>|verify <id> <結果檔>   MAS-11/12/13 模型進容器＋SHA-256(download 結束才寫結果,1 GB 要等)
+//   myparrotctl engine get|set appleNative|whisperKit <結果檔>              切逐字稿引擎(同設定頁)
+//   myparrotctl prefs <結果檔>                                            印自己網域的偏好鍵(Data 只印長度)
+//   myparrotctl consent status|reset|show|accept|cancel <結果檔>         MAS-17 一次性錄音提示(show＝走真提示;state 也帶 consent、indicator)
+//   myparrotctl legal <結果檔>                                            MAS-16 連結與第三方授權全文是否在 bundle
+//   myparrotctl onboarding status|reset|show|download|later <結果檔>     MAS-31 首啟模型下載卡片(download＝按「下載建議模型」)
+//   myparrotctl scope-probe <結果檔>                                      MAS-33 書籤 URL vs 重建 URL 的 startAccessing(沙盒 true/false)
 //   myparrotctl transcribe-policy get|set <immediately|whenIdle|never> /tmp/r.json ; transcribe-idle status|force /tmp/r.json   #2483 E:重轉時機、待閒置重轉(force＝忽略閒置條件立刻重轉一筆)
 //   myparrotctl afm status|force <deviceNotEligible|appleIntelligenceNotEnabled|modelNotReady|unknown|unsupported>|clear /tmp/r.json   #2438 Phase 3a:Apple 本機模型可用性(force＝DEBUG 覆寫,校正與會議記錄都看得到;state 也回 afm)
 //   myparrotctl settings open /tmp/r.json ; window mini /tmp/r.json ; dismiss-warning /tmp/r.json
