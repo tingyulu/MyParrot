@@ -52,6 +52,10 @@ verify_mas_signature() {
     [ -n "$v" ] || { echo "  ❌ 用途字串 $k 缺或為空"; fail=1; }
   done
   [ -f "$app/Contents/Resources/PrivacyInfo.xcprivacy" ] || { echo "  ❌ 缺 Resources/PrivacyInfo.xcprivacy"; fail=1; }
+  # MAS-26 偏差(10/30):ITMS-90546 ⇒ 商店版要有 Assets.car 且 CFBundleIconName=AppIcon
+  [ -f "$app/Contents/Resources/Assets.car" ] || { echo "  ❌ 缺 Resources/Assets.car(ITMS-90546 Missing asset catalog)"; fail=1; }
+  local iconname; iconname="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$plist" 2>/dev/null || echo missing)"
+  [ "$iconname" = "AppIcon" ] || { echo "  ❌ CFBundleIconName=$iconname,應為 AppIcon"; fail=1; }
   # 3. entitlements:從最終簽章讀回(不是讀來源檔),恰好六條、全 true
   if ! codesign -d --entitlements "$ent" --xml "$app" 2>/dev/null; then echo "  ❌ 讀不到簽章 entitlements"; fail=1; fi
   if [ -s "$ent" ]; then
@@ -64,7 +68,7 @@ verify_mas_signature() {
   fi
   rm -f "$ent"
   if [ "$fail" = 0 ]; then
-    echo "  ✅ Identifier=$sig_id TeamIdentifier=$team(憑證 OU 相符)、六條 entitlements、六條用途字串、加密宣告、privacy manifest 全部一致"
+    echo "  ✅ Identifier=$sig_id TeamIdentifier=$team(憑證 OU 相符)、六條 entitlements、六條用途字串、加密宣告、privacy manifest、Assets.car 全部一致"
   else
     echo "  ❌ MAS-34 檢查不通過"
   fi
@@ -125,6 +129,40 @@ if [ "$FLAVOR" = mas ]; then
   /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $MAS_BUNDLE_ID" "$APP/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c "Add :ITSAppUsesNonExemptEncryption bool false" "$APP/Contents/Info.plist"
   echo "▶ MAS Info.plist 補丁:CFBundleIdentifier=$MAS_BUNDLE_ID、ITSAppUsesNonExemptEncryption=false"
+  # MAS-26 偏差(10/30):ASC processing 回 ITMS-90546「Missing asset catalog」——商店版 bundle 必須帶 Assets.car(含 AppIcon)。
+  # 從既有 AppIcon.icns 反推 iconset → 組 .xcassets → actool 編成 Assets.car;Info.plist 的 CFBundleIconName=AppIcon 本來就有。
+  # 只在商店版做(GitHub 版零回歸);actool 是 Xcode 的,商店版本來就要 Xcode。
+  ACT_TMP="$(mktemp -d -t myparrot-assets)"
+  iconutil -c iconset Resources/AppIcon.icns -o "$ACT_TMP/AppIcon.iconset"
+  ICONSET_DIR="$ACT_TMP/Assets.xcassets/AppIcon.appiconset"
+  mkdir -p "$ICONSET_DIR"
+  printf '{"info":{"author":"xcode","version":1}}\n' > "$ACT_TMP/Assets.xcassets/Contents.json"
+  {
+    printf '{"images":['
+    first=1
+    for sz in 16 32 128 256 512; do
+      for scale in 1 2; do
+        if [ "$scale" = 1 ]; then f="icon_${sz}x${sz}.png"; else f="icon_${sz}x${sz}@2x.png"; fi
+        [ -f "$ACT_TMP/AppIcon.iconset/$f" ] || { echo "❌ iconset 缺 $f(AppIcon.icns 不完整)"; exit 1; }
+        cp "$ACT_TMP/AppIcon.iconset/$f" "$ICONSET_DIR/$f"
+        [ "$first" = 1 ] || printf ','; first=0
+        printf '{"idiom":"mac","size":"%sx%s","scale":"%sx","filename":"%s"}' "$sz" "$sz" "$scale" "$f"
+      done
+    done
+    printf '],"info":{"author":"xcode","version":1}}\n'
+  } > "$ICONSET_DIR/Contents.json"
+  MIN_OS="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$APP/Contents/Info.plist")"
+  if ! xcrun actool "$ACT_TMP/Assets.xcassets" --compile "$APP/Contents/Resources" --platform macosx \
+       --minimum-deployment-target "$MIN_OS" --app-icon AppIcon \
+       --output-partial-info-plist "$ACT_TMP/partial.plist" --output-format human-readable-text \
+       --errors --warnings > "$ACT_TMP/actool.log" 2>&1; then
+    echo "❌ actool 失敗:"; cat "$ACT_TMP/actool.log"; exit 1
+  fi
+  [ -f "$APP/Contents/Resources/Assets.car" ] || { echo "❌ actool 沒產出 Assets.car"; cat "$ACT_TMP/actool.log"; exit 1; }
+  ICON_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$ACT_TMP/partial.plist" 2>/dev/null || true)"
+  [ "$ICON_NAME" = "AppIcon" ] || { echo "❌ actool partial plist CFBundleIconName=$ICON_NAME,應為 AppIcon"; exit 1; }
+  echo "▶ embedded Assets.car(actool,AppIcon 10 張,min macOS $MIN_OS;$(stat -f %z "$APP/Contents/Resources/Assets.car") bytes)"
+  rm -rf "$ACT_TMP"
 fi
 
 # UI-32:吉祥物 PNG 幀(idle=閉嘴/sing=張嘴);缺任一檔=用向量 fallback,不阻擋打包。
