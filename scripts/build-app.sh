@@ -311,20 +311,35 @@ if [ "$FLAVOR" = mas ] && [ "$MAS_SIGN" = dist ]; then
   echo "▶ productbuild → $PKG(installer 簽:$INSTALLER_ID)"
   productbuild --component "$APP" /Applications --sign "$INSTALLER_ID" "$PKG"
   pkgutil --check-signature "$PKG" | sed 's/^/   /'
-  # 10/30：Key ID／Issuer ID 沒在 env 時讀 ~/.private_keys/asc-ids.env（兩行 KEY=VALUE，非秘密；.p8 另放同夾）
-  if [ -z "${MYPARROT_ASC_API_KEY_ID:-}" ] && [ -f "$HOME/.private_keys/asc-ids.env" ]; then
-    set -a; . "$HOME/.private_keys/asc-ids.env"; set +a
+  # 10/30（二審後）：Key ID／Issuer ID 任一沒在 env 時讀 ~/.private_keys/asc-ids.env —— 只認兩個 KEY=VALUE、🚫 不 source
+  # （非秘密;.p8 另放同夾）。validate 是 mas-dist 的一部分(MAS-25):跑不了就 exit 2、altool 失敗就 exit 1,不再靜默回 0。
+  IDS_FILE="${MYPARROT_ASC_IDS_FILE:-$HOME/.private_keys/asc-ids.env}"   # 測試用覆寫;平常不設
+  if { [ -z "${MYPARROT_ASC_API_KEY_ID:-}" ] || [ -z "${MYPARROT_ASC_API_ISSUER_ID:-}" ]; } && [ -f "$IDS_FILE" ]; then
+    while IFS='=' read -r k v; do
+      case "$k" in
+        ''|'#'*) continue ;;
+        MYPARROT_ASC_API_KEY_ID)    [ -z "${MYPARROT_ASC_API_KEY_ID:-}" ]    && MYPARROT_ASC_API_KEY_ID="$v" ;;
+        MYPARROT_ASC_API_ISSUER_ID) [ -z "${MYPARROT_ASC_API_ISSUER_ID:-}" ] && MYPARROT_ASC_API_ISSUER_ID="$v" ;;
+        *) echo "❌ $IDS_FILE 有未知的 key「$k」(只認 MYPARROT_ASC_API_KEY_ID／MYPARROT_ASC_API_ISSUER_ID)"; exit 1 ;;
+      esac
+    done < "$IDS_FILE"
   fi
   if [ -n "${MYPARROT_ASC_API_KEY_ID:-}" ] && [ -n "${MYPARROT_ASC_API_ISSUER_ID:-}" ]; then
+    case "$MYPARROT_ASC_API_KEY_ID" in
+      *[!A-Z0-9]*|'') echo "❌ MYPARROT_ASC_API_KEY_ID 格式不對(預期 10 個大寫英數)"; exit 1 ;;
+    esac
+    [ -f "$HOME/.private_keys/AuthKey_$MYPARROT_ASC_API_KEY_ID.p8" ] || { echo "❌ 找不到 ~/.private_keys/AuthKey_$MYPARROT_ASC_API_KEY_ID.p8"; exit 1; }
     echo "▶ xcrun altool --validate-app(App Store Connect API key $MYPARROT_ASC_API_KEY_ID;.p8 放 ~/.private_keys/)"
-    xcrun altool --validate-app -f "$PKG" -t macos --apiKey "$MYPARROT_ASC_API_KEY_ID" --apiIssuer "$MYPARROT_ASC_API_ISSUER_ID"
+    if ! xcrun altool --validate-app -f "$PKG" -t macos --apiKey "$MYPARROT_ASC_API_KEY_ID" --apiIssuer "$MYPARROT_ASC_API_ISSUER_ID"; then
+      echo "❌ altool validate 失敗:$PKG 不可送件"; exit 1
+    fi
     echo "✅ 商店版 .pkg 已產出並通過 altool validate:$PKG(本機不會安裝;Apple Distribution 簽的 app 本機直接開會被 Gatekeeper 擋,是預期的)"
-  else
-    echo "⚠️ 商店版 .pkg 已產出但**未經 altool 驗證**(未設 MYPARROT_ASC_API_KEY_ID／MYPARROT_ASC_API_ISSUER_ID):$PKG"
-    echo "   驗證:xcrun altool --validate-app -f \"$PKG\" -t macos --apiKey <KEY_ID> --apiIssuer <ISSUER_ID>"
-    echo "   上傳:xcrun altool --upload-package … 或把 .pkg 拖進 Transporter.app"
+    exit 0
   fi
-  exit 0
+  echo "⚠️ 商店版 .pkg 已產出但**未經 altool 驗證**(缺 MYPARROT_ASC_API_KEY_ID／MYPARROT_ASC_API_ISSUER_ID,env 與 $IDS_FILE 都沒有):$PKG"
+  echo "   驗證:xcrun altool --validate-app -f \"$PKG\" -t macos --apiKey <KEY_ID> --apiIssuer <ISSUER_ID>"
+  echo "   上傳:xcrun altool --upload-package … 或把 .pkg 拖進 Transporter.app"
+  exit 2
 fi
 
 # --- Install to ~/Applications (non-iCloud) so the signature stays valid ------
