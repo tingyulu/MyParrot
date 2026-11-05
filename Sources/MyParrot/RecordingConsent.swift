@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import MyParrotCore
+import os
 
 /// MAS-17(#2646,App Review 2.5.14;兩版都有):第一次按「開始錄音」先跳一次性提示,按「我知道了，開始錄音」才開錄;
 /// 偏好 `recordingConsentShown` 記住、之後不再跳。四個 GUI 入口(遙控器大鈕、迷你列、⌘R、會議提醒通知)都經這裡;
@@ -60,8 +61,21 @@ enum RecordingIndicator {
     private static var statusItem: NSStatusItem?
     private static let target = StatusItemTarget()
 
+    #if DEBUG
+    /// #2737:最近一次 update 的動作與耗時(ms),DebugControl `perf stop-phases` 讀。只量不改行為。
+    static var lastUpdate: (action: String, ms: Double)?
+    #endif
+
     static func update(state: RecordingState) {
         let active = state == .recording || state == .paused
+        #if DEBUG
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        defer {
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6
+            lastUpdate = (active ? "show" : "remove", ms)
+            if ms >= 20 { os_log("MyParrot indicator: %{public}@ took %.1f ms", active ? "show" : "remove", ms) }
+        }
+        #endif
         NSApp.dockTile.badgeLabel = active ? (state == .paused ? "II" : "REC") : nil
         guard active else {
             if let item = statusItem { NSStatusBar.system.removeStatusItem(item); statusItem = nil }

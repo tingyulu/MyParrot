@@ -17,13 +17,26 @@ public struct AppleFMMinutesProvider: MinutesProvider {
         self.chunkMax = chunkMax
     }
 
+    /// AFM-13(#2667):五欄草稿的 `@Guide` 描述跟 `MinutesPrompt.system(for:)` 走同一個 zh／其他分支(`language.isChinese`)。
+    /// 11/05 真跑:英文逐字稿＋英文 system prompt,中文描述仍把五欄全部帶成中文(342 個 CJK 字元)⇒ 描述語言決定輸出語言。
+    /// 中文描述原樣保留(10/20 驗過的品質不動);其他八語用英文描述,輸出語言交給 system 第 5 條「寫逐字稿的語言」。
+    /// 兩套的欄位、上限(12／20)與 `MinutesPrompt.schema` 五格一字不差;送出資料範圍不變。
     @Generable
-    struct MinutesDraft {
+    struct MinutesDraftZH: MinutesDraftFields {
         @Guide(description: "會議摘要,最多 300 字") var summary: String
         @Guide(description: "決議事項,每條一句", .maximumCount(12)) var decisions: [String]
         @Guide(description: "待辦事項,每條一句(含負責人若有)", .maximumCount(12)) var actions: [String]
         @Guide(description: "待釐清問題,每條一句", .maximumCount(12)) var questions: [String]
         @Guide(description: "時間軸,每條「h:mm:ss 事件」", .maximumCount(20)) var timeline: [String]
+    }
+
+    @Generable
+    struct MinutesDraftEN: MinutesDraftFields {
+        @Guide(description: "Meeting summary, at most 300 characters") var summary: String
+        @Guide(description: "Decisions made, one sentence each", .maximumCount(12)) var decisions: [String]
+        @Guide(description: "Action items, one sentence each (include the owner if stated)", .maximumCount(12)) var actions: [String]
+        @Guide(description: "Open questions, one sentence each", .maximumCount(12)) var questions: [String]
+        @Guide(description: "Timeline, each entry \"h:mm:ss event\"", .maximumCount(20)) var timeline: [String]
     }
 
     public func update(_ input: MinutesInput) async throws -> MinutesDocument {
@@ -32,7 +45,8 @@ public struct AppleFMMinutesProvider: MinutesProvider {
         let notes = AFMBudget.notesTail(input.notes)
         let chunks = AFMBudget.chunk(lines: input.transcriptDelta, max: chunkMax)
         var inTokens = 0, outTokens = 0, skipped = 0
-        var produced: MinutesDraft? = nil
+        var produced: MinutesDocument? = nil
+        let zh = input.language.isChinese   // AFM-13:與 MinutesPrompt.system(for:) 同一個判準
         let work: [[String]] = chunks.isEmpty ? [[]] : chunks
         for chunk in work {
             var attempt = 1
@@ -44,10 +58,10 @@ public struct AppleFMMinutesProvider: MinutesProvider {
                     let user = MinutesPrompt.user(MinutesInput(previous: previous, transcriptDelta: piece, notes: notes, language: input.language))
                     inTokens += AFMBudget.estimateTokens(instructions) + AFMBudget.estimateTokens(user)
                     do {
-                        let draft = try await respond(instructions: instructions, user: user)
-                        outTokens += AFMBudget.estimateTokens(Self.draftJSON(draft))
-                        produced = draft
-                        previous = Self.document(from: draft, previous: input.previous, now: Date())
+                        let doc = try await respondDocument(zh: zh, instructions: instructions, user: user, previous: input.previous)
+                        outTokens += AFMBudget.estimateTokens(MinutesPrompt.previousJSON(doc) ?? "")
+                        produced = doc
+                        previous = doc
                     } catch let e as LanguageModelSession.GenerationError {
                         if AFMErrors.isContextOverflow(e) {
                             // AFM-05:對半再試,最多 3 次(10/20 真跑:框架的 case 名比對不到,改看描述當後備)。
@@ -83,39 +97,53 @@ public struct AppleFMMinutesProvider: MinutesProvider {
                 done = okAll
             }
         }
-        guard let draft = produced else {
+        guard var doc = produced else {
             if skipped > 0 { throw MinutesError.badOutput("安全守則拒絕了全部段落") }
             throw MinutesError.badOutput("沒有產出")
         }
-        var doc = Self.document(from: draft, previous: input.previous, now: Date())
         doc.inputTokens = inTokens
         doc.outputTokens = outTokens
         return doc
     }
 
-    private func respond(instructions: String, user: String) async throws -> MinutesDraft {
+    /// AFM-13:依語言挑草稿型別(zh ⇒ 中文描述,其他 ⇒ 英文描述),回來先轉成 `MinutesDocument`,後面流程不分語言。
+    private func respondDocument(zh: Bool, instructions: String, user: String, previous: MinutesDocument?) async throws -> MinutesDocument {
+        if zh {
+            let d: MinutesDraftZH = try await respond(instructions: instructions, user: user)
+            return Self.document(from: d, previous: previous, now: Date())
+        } else {
+            let d: MinutesDraftEN = try await respond(instructions: instructions, user: user)
+            return Self.document(from: d, previous: previous, now: Date())
+        }
+    }
+
+    private func respond<D: Generable & Sendable>(instructions: String, user: String) async throws -> D {
         let session = LanguageModelSession(instructions: instructions)
         // 10/20 真跑:預設取樣品質起伏大(校正閘 8/10 → 0/10),改 greedy 求可重現。
         let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: AFMBudget.outputMax)
         return try await AFMTimeout.run(seconds: timeout) {
-            try await session.respond(to: user, generating: MinutesDraft.self, options: options).content
+            try await session.respond(to: user, generating: D.self, options: options).content
         }
     }
 
-    static func document(from d: MinutesDraft, previous: MinutesDocument?, now: Date) -> MinutesDocument {
+    static func document(from d: some MinutesDraftFields, previous: MinutesDocument?, now: Date) -> MinutesDocument {
         MinutesDocument(summary: d.summary, decisions: d.decisions, actions: d.actions, questions: d.questions,
                         timeline: d.timeline, updatedAt: now, inputTokens: 0, outputTokens: 0,
                         transcriptLinesConsumed: previous?.transcriptLinesConsumed ?? 0)
     }
 
-    static func draftJSON(_ d: MinutesDraft) -> String {
-        MinutesPrompt.previousJSON(MinutesDocument(summary: d.summary, decisions: d.decisions, actions: d.actions,
-                                                   questions: d.questions, timeline: d.timeline)) ?? ""
-    }
-
     static func oneLine(_ e: Error) -> String {
         String(String(describing: e).split(separator: "\n").first ?? "").prefix(120).description
     }
+}
+
+/// AFM-13:兩套 `@Generable` 草稿共用的五欄讀取面,讓 `document(from:)` 不分語言。
+protocol MinutesDraftFields {
+    var summary: String { get }
+    var decisions: [String] { get }
+    var actions: [String] { get }
+    var questions: [String] { get }
+    var timeline: [String] { get }
 }
 
 /// 框架錯誤分類:先比 case,比不到就看描述(10/20 真跑發現 `exceededContextWindowSize` 的 case 比對不中,

@@ -127,6 +127,8 @@ struct SelfTestCases {
     @Test("PERM-05 對方軌無聲警告分流") func sysSilentBannerSplit() { check(SelfTest.sysSilentBannerSplit()) }
     // PERF Z 節(2026-11-04):錄音中 UI 節流的純函式(案例在 SelfTest+Perf.swift)
     @Test("PERF-01 UI 更新節流(秒、電平合併、相位)") func uiRefreshThrottle() { check(SelfTest.uiRefreshThrottle()) }
+    // GATE AA 節(2026-11-05):錄音回放源純函式(案例在 SelfTest+Replay.swift)
+    @Test("GATE-01 回放源純函式(切塊、到點、聲道、電平)") func replayPlan() { check(SelfTest.replayPlan()) }
     // TR-29 #2672:即時稿行緩衝(案例在 SelfTest+LiveLines.swift)
     @Test("TR-29 即時稿行緩衝換代") func liveLineBuffer() { check(SelfTest.liveLineBuffer()) }
     // TR-31 #2676:停止後晚到的定稿分流與收尾恰好一次(案例在 SelfTest+LiveLines.swift)

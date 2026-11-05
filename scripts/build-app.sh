@@ -123,6 +123,15 @@ cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 # MAS-27:privacy manifest 兩版都嵌(內容＝docs/PRIVACY.md;不追蹤、不收集)。
 cp Resources/PrivacyInfo.xcprivacy "$APP/Contents/Resources/PrivacyInfo.xcprivacy"
+# GATE-06(TEST_PLAN AA 節):測試閘用的 bundle id 後綴(例 perfgate)⇒ 偏好、TCC、容器都跟 Eric 現用的兩支隔開。
+# 只給 GitHub 口味;商店版的 id 由 MAS-34 對帳鎖死,帶後綴直接拒絕。帶後綴必須同時給 MYPARROT_DEST_DIR(🚫 蓋 ~/Applications)。
+if [ -n "${MYPARROT_BUNDLE_SUFFIX:-}" ]; then
+  [ "$FLAVOR" = mas ] && { echo "❌ MYPARROT_BUNDLE_SUFFIX 不能用在商店版(bundle id 由 MAS-34 鎖死)"; exit 1; }
+  case "$MYPARROT_BUNDLE_SUFFIX" in *[!a-zA-Z0-9-]*) echo "❌ MYPARROT_BUNDLE_SUFFIX 只准字母、數字與 -:$MYPARROT_BUNDLE_SUFFIX"; exit 1;; esac
+  [ -n "${MYPARROT_DEST_DIR:-}" ] || { echo "❌ 帶 MYPARROT_BUNDLE_SUFFIX 的 build 必須指定 MYPARROT_DEST_DIR(不可蓋 ~/Applications 的正式版)"; exit 1; }
+  /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier tw.uncle.MyParrot.$MYPARROT_BUNDLE_SUFFIX" "$APP/Contents/Info.plist"
+  echo "▶ bundle id 後綴:CFBundleIdentifier=tw.uncle.MyParrot.$MYPARROT_BUNDLE_SUFFIX(測試閘專用;偏好／TCC／容器與正式版隔開)"
+fi
 if [ "$FLAVOR" = mas ]; then
   # MAS-04:商店版 bundle id(Eric 2026-10-29 B1)、顯示名維持 MyParrot、加密宣告(不含非豁免加密 ⇒ 免出口文件)。
   # 來源 Resources/Info.plist 不動(GitHub 版零回歸),只改這份複本。
@@ -408,6 +417,10 @@ else
 fi
 
 echo "✅ Built & installed $(basename "$APP")"
+if [ -z "${MYPARROT_BUNDLE_SUFFIX:-}" ]; then
+  # GATE-07(TEST_PLAN AA 節):裝機／發版前先跑效能閘(回放檔、不需 TCC、約 3 分鐘、會開一支測試視窗);紅就不裝、不發。
+  echo "   ℹ️ 裝機／發版前先跑效能閘:python3 scripts/dev/perf-gate.py  (AA 節 GATE-04;--engine whisper 發版前再跑一次)"
+fi
 echo "   執行(建議從這裡開,權限才記得住):  open \"$DEST\""
 echo "   ⚠️ 換新版前先 Cmd+Q 完全關掉舊的,否則 open 只會把舊實例叫到前面。"
 echo "   首次啟動只會要 麥克風 + 語音辨識 + 系統音訊擷取(不要螢幕錄影)。"

@@ -17,6 +17,11 @@
 <img src="docs/img/main-window-dark.png" width="560" alt="Main window (dark) — obsidian controller">
 </p>
 
+## What's new in 0.5.5
+
+- **Fixed: with an English UI, the Apple on-device model wrote meeting minutes and correction suggestions in Chinese** — even with an English UI, an English transcript and the English system prompt, all five minutes fields (summary, decisions, action items, open questions, timeline) and every correction reason came back in Chinese. Cause: the structured-output field descriptions (`@Guide`) existed only in Chinese, and the model answers in the language of those descriptions. There are now two sets of descriptions (Chinese / English) picked by the transcript language, shared by minutes and correction. Measured: minutes from a 30-line English transcript went from 342 CJK characters to 0; Chinese transcripts are unchanged. Japanese, Korean, Spanish, German, French and Portuguese UIs use the English descriptions; their output language has not been verified individually.
+- Known issues unchanged from 0.5.4.
+
 ## What's new in 0.5.4
 
 - **Fixed: typing notes while recording stuttered** — six always-on animations (controller pulse, breathing LED, mascot) plus a 4 Hz clock and ~24 Hz level meters made SwiftUI re-lay out the whole window on every frame of a ProMotion display, eating 40–70% of the main thread while Whisper large-v3 was transcribing live. The decorations now share one 10 Hz timer, level meters coalesce to 100 ms, the clock publishes once a second, the notes toolbar no longer follows the clock, state-file writes and folder scans moved off the main thread, and syntax colouring is debounced and skipped while an input method is composing. Debug build: recording CPU 30–52% → 18–27%, main-thread layout passes down 89%.

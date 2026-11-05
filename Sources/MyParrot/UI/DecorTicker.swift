@@ -9,8 +9,20 @@ import MyParrotCore
 /// 🚫 不用 `TimelineView`:11/04 實測(macOS 27.0)只要樹上有 TimelineView——哪怕 `.periodic(by: 86400)`——display link 就每一幀
 /// 進一次 layout pass(fix2 待錄音 render 樣本 148→777);基線鸚鵡 0.35 s 換幀的 TimelineView 也是同一個洞。
 /// 🚫 之後工作區裡的持續動畫一律接這個,不准再用 `repeatForever`／`TimelineView`。
+#if DEBUG
+/// GATE-05 正控(TEST_PLAN AA 節):DebugControl `perf storm <hz>` 把裝飾時鐘催到每秒 N 次 ⇒ 每個 tick 一次整窗 pass,
+/// 重現修前「高頻狀態變動 ⇒ 每幀整窗 layout」的機制;效能閘對它必須量到紅(render／CPU 爆門檻),否則閘的尺有問題。
+/// 只在 DEBUG;`off`(nil)還原 10 Hz。泛型 struct 不能放 static 儲存屬性,所以放這裡。
+@MainActor enum DecorTickerDebug { static var hz: Double? = nil }
+#endif
+
 struct DecorTicker<Content: View>: View {
-    static var interval: Duration { .milliseconds(100) }
+    @MainActor static var interval: Duration {
+        #if DEBUG
+        if let hz = DecorTickerDebug.hz, hz > 0 { return .milliseconds(max(1, Int(1000 / hz))) }
+        #endif
+        return .milliseconds(100)
+    }
     let active: Bool
     @ViewBuilder let content: (Date) -> Content
     @State private var tick: Date = .distantPast

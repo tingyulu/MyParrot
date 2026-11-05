@@ -49,6 +49,10 @@ public enum TranscriptionLanguage: String, CaseIterable, Identifiable, Sendable 
         }
     }
 
+    /// AFM-13(#2667):Apple 本機模型後端挑 `@Guide` 描述語言的判準。**必須**等於 `MinutesPrompt.system(for:)`／
+    /// `CorrectionPrompt.system(for:)` 的 `case "zh"` 分支(SelfTest `minutesPrompt` 逐語言釘著,分歧就紅)。
+    public var isChinese: Bool { resolved().language.languageCode?.identifier == "zh" }
+
     /// Resolve to a concrete locale. `.system` follows the OS language; anything
     /// unsupported falls back to English.
     public func resolved() -> Locale {

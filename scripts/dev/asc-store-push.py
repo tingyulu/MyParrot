@@ -7,7 +7,7 @@
   --only：只處理這些段：app,categories,agerating,appinfo,version,versionloc,screenshots,review；price 不在預設，要 --only price 顯式跑。
 寫的範圍（只有這些；🚫 不碰 builds、appStoreVersionSubmissions、availability、App Privacy）：
   apps.contentRightsDeclaration｜appInfos 主／次類別｜ageRatingDeclaration 全「無」｜appInfoLocalizations ×9（name／subtitle／privacyPolicyUrl）
-  appStoreVersion（versionString 只允許從 ASC 預設 1.0 改成 0.5.3／copyright／releaseType MANUAL）｜appStoreVersionLocalizations ×9（五欄）
+  appStoreVersion（versionString 只允許從 ASC 預設 1.0 或上一個目標 0.5.3 改成 0.5.5／copyright／releaseType MANUAL）｜appStoreVersionLocalizations ×9（五欄）
   appScreenshotSets APP_DESKTOP：以 MD5 判斷每個語系缺哪張（同名不同內容或 FAILED／沒 commit 的先刪再傳；多餘的不刪、停下來要人清）、傳完排順序
   appStoreReviewDetail（聯絡人＋notes）｜appPriceSchedule（Free；既有價格若不是 0 就停下來不自動改）
 安全：鎖 Apple ID 6828903849 ＋ bundle tw.uncle.MyParrot.mas，不符 exit 1；恰好一個可編輯 appInfo 與 macOS 版本；聯絡人欄位終端只印遮蔽值。
@@ -25,7 +25,8 @@ APP_ID = "6828903849"
 BUNDLE = "tw.uncle.MyParrot.mas"
 APP_NAME = "MyParrot"
 LOCALES = ["zh-Hant", "en-US", "ja", "ko", "zh-Hans", "es-ES", "de-DE", "fr-FR", "pt-BR"]
-VERSION_STRING = "0.5.3"
+VERSION_STRING = "0.5.5"             # 11/05 Eric A1:送審 build 改從公開倉 v0.5.5 (12) 建,ASC 版本字串跟著 build 的 CFBundleShortVersionString
+PREVIOUS_VERSION = "0.5.3"           # 10/30 寫進 ASC 的上一個目標;只允許從它或 ASC 預設改成 VERSION_STRING
 ASC_DEFAULT_VERSION = "1.0"          # ASC 建 App 時的預設版本字串；只允許從它改成 VERSION_STRING
 COPYRIGHT = "2026 TING YU Lu"
 PRIVACY_URL = "https://github.com/tingyulu/MyParrot/blob/main/docs/PRIVACY.md"
@@ -42,7 +43,7 @@ AGE_FALSE = {k: False for k in ["advertising", "ageAssurance", "gambling", "heal
 AGE_TARGET = {**AGE_NONE, **AGE_FALSE, "ageRatingOverrideV2": "NONE", "koreaAgeRatingOverride": "NONE"}
 SENSITIVE = {"contactFirstName", "contactLastName", "contactPhone", "contactEmail"}
 SCRUB = []        # 聯絡人原值（含 JSON 轉義與 URL 編碼形式），印任何錯誤訊息前先遮掉
-SCHEMA_VERSION = "2026-10-31.4"   # 腳本寫入規則版本，進 manifest
+SCHEMA_VERSION = "2026-11-05.1"   # 腳本寫入規則版本，進 manifest
 AGE_OTHER_KNOWN = {"kidsAgeBand", "ageRatingOverride", "gracRatingClassificationNumber", "developerAgeRatingInfoUrl"}  # 不動也不算「漏答」的欄位
 
 LOG = []
@@ -310,10 +311,10 @@ def sec_appinfo(c, info, meta):
 def sec_version(c, ver):
     print("\n## version（versionString／copyright／releaseType）")
     cur_vs = ver["attributes"].get("versionString")
-    if cur_vs not in (ASC_DEFAULT_VERSION, VERSION_STRING):
-        die(1, f"守門：版本字串 {cur_vs} 既不是 ASC 預設 {ASC_DEFAULT_VERSION} 也不是目標 {VERSION_STRING}，拒絕改寫")
+    if cur_vs not in (ASC_DEFAULT_VERSION, PREVIOUS_VERSION, VERSION_STRING):
+        die(1, f"守門：版本字串 {cur_vs} 不是 ASC 預設 {ASC_DEFAULT_VERSION}、上一個目標 {PREVIOUS_VERSION} 或目標 {VERSION_STRING}，拒絕改寫")
     ch = diff_attrs("appStoreVersion", ver["attributes"], {"versionString": VERSION_STRING, "copyright": COPYRIGHT, "releaseType": "MANUAL"})
-    if ch: c.write("PATCH", f"/v1/appStoreVersions/{ver['id']}", {"data": {"type": "appStoreVersions", "id": ver["id"], "attributes": ch}}, "版本 0.5.3／版權／手動發佈")
+    if ch: c.write("PATCH", f"/v1/appStoreVersions/{ver['id']}", {"data": {"type": "appStoreVersions", "id": ver["id"], "attributes": ch}}, f"版本 {VERSION_STRING}／版權／手動發佈")
 
 
 def version_locs(c, ver):
@@ -606,8 +607,8 @@ def main():
     editable_v = [v for v in vers if v["attributes"].get("appVersionState") in ("PREPARE_FOR_SUBMISSION", "DEVELOPER_REJECTED", "REJECTED", "METADATA_REJECTED")]
     if len(editable_v) != 1: die(1, f"守門：可編輯的 macOS 版本不是恰好一個：{[(v['attributes']['versionString'], v['attributes'].get('appVersionState')) for v in vers]}")
     ver = editable_v[0]
-    if ver["attributes"].get("versionString") not in (ASC_DEFAULT_VERSION, VERSION_STRING):
-        die(1, f"守門：版本字串 {ver['attributes'].get('versionString')} 不是 {ASC_DEFAULT_VERSION} 或 {VERSION_STRING}")
+    if ver["attributes"].get("versionString") not in (ASC_DEFAULT_VERSION, PREVIOUS_VERSION, VERSION_STRING):
+        die(1, f"守門：版本字串 {ver['attributes'].get('versionString')} 不是 {ASC_DEFAULT_VERSION}、{PREVIOUS_VERSION} 或 {VERSION_STRING}")
     print(f"守門通過：{APP_NAME}／{BUNDLE}；appInfo {info['id']}；版本 {ver['attributes']['versionString']}（{ver['attributes'].get('appVersionState')}，id {ver['id']}）")
 
     if "app" in only: sec_app(c, app)

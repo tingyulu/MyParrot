@@ -14,8 +14,8 @@ public enum MinutesPrompt {
     public static let maxTimelineItems = 20
 
     public static func system(for language: TranscriptionLanguage) -> String {
-        switch language.resolved().language.languageCode?.identifier {
-        case "zh":
+        switch language.isChinese {   // AFM-13:與 AFM 後端的 @Guide 描述共用同一個判準
+        case true:
             return """
             你是會議記錄助手,負責維護一份「滾動更新」的結構化會議記錄。使用者訊息分三段:\(previousMarker)(上一版記錄,JSON;\(noneMarker) 表示尚無)、\(transcriptMarker)(自上次更新之後新增的逐字稿,每行＝講者 時間: 文字;\(noneMarker) 表示沒有新內容)、\(notesMarker)(使用者自己寫的筆記全文,可能沒有這段)。規則:1. 只依據這三段文字,不編造、不推測沒提到的事。2. 使用者筆記是人標的重點,優先級最高,筆記裡的事項一定要反映在對應欄位。3. 上一版已有的決議與待辦,除非新逐字稿明確推翻,否則保留並視需要補充。4. 時間軸每項以逐字稿行的時間 h:mm:ss 開頭,只記關鍵轉折。5. 用逐字稿的語言輸出。6. 摘要不超過 \(maxSummaryChars) 字;決議、待辦、待釐清各不超過 \(maxListItems) 項;時間軸不超過 \(maxTimelineItems) 項。7. 只回 JSON。
             """

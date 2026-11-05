@@ -115,6 +115,40 @@ public final class RecordingController {
     private let system = SystemAudioCapture()
     // `var` so the live mic engine can be swapped mid-recording (hot-swap, AUD-20).
     private var mic = MicCapture()
+    #if DEBUG
+    /// GATE-02(TEST_PLAN AA 節):DEBUG 回放源——設了就不起麥克風與系統 tap,改由檔案丟同兩組回呼(左＝對方、右＝你)。
+    /// 啟動時讀環境變數 `MYPARROT_REPLAY`;DebugControl `replay set|clear|status` 可改。release 沒有這條路。
+    public var replayURL: URL? = ProcessInfo.processInfo.environment["MYPARROT_REPLAY"].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) }
+    private var replay: ReplayCapture?
+    /// 給 DebugControl `replay status`:回放中的檔與是否播完(nil＝這場不是回放)。
+    public var replayStatus: (url: URL, finished: Bool, error: String?, sentChunks: Int, totalChunks: Int, maxLateMs: Double)? {
+        replay.map { let s = $0.status; return ($0.url, s.finished, s.error, s.sentChunks, s.totalChunks, s.maxLateMs) }
+    }
+
+    /// GATE-02:設了 `replayURL` 就起回放源、回 true(呼叫端跳過麥克風與系統 tap)。
+    /// 四個回呼接的是開錄時已設在 `system`／`mic` 上的那四個閉包 ⇒ 電平合併、錄音寫檔、即時稿、看門狗全走原路。
+    private func startReplayIfConfigured() throws -> Bool {
+        guard let rURL = replayURL else { return false }
+        let r = try ReplayCapture(url: rURL)
+        r.onOtherLevel = system.onLevel; r.onOtherBuffer = system.onBuffer
+        r.onYouLevel = mic.onLevel;      r.onYouBuffer = mic.onBuffer
+        // 讀檔失敗／短讀是終止性錯誤:回放停、錯誤進 lastError(橫幅／CLI／閘都看得到),這場錄音本身照舊由人決定停不停。
+        r.onError = { [weak self] message in
+            Task { @MainActor in self?.lastError = "回放源：\(message)" }
+        }
+        replay = r
+        // 二審:前一場／切麥留下還沒回來的 completion 與逾時全部作廢——回放這場沒有裝置可重建、不該被舊事件寫警告或重建。
+        micSwapGeneration += 1
+        sysRebuildGeneration += 1
+        isSwitchingMic = false
+        isRebuildingSys = false
+        r.start()
+        finishMicSwitch(succeeded: true)          // 回放沒有切換期:看門狗立刻以「新引擎 8 秒緩衝」起算
+        lastSysLevelAt = Date(); lastSysSignalAt = Date()
+        os_log("MyParrot replay: 開錄改用回放檔 %{public}@ (%.1f s, %d ch @ %.0f Hz)", rURL.lastPathComponent, r.duration, r.channels, r.sampleRate)
+        return true
+    }
+    #endif
     // `var`(AUD-38 F6):每次開麥克風測試都建新實例,不在 tap 可能還在跑時改寫舊實例的 closure。
     private var monitor = MicCapture()
     private let recorder = StereoRecorder()
@@ -1404,46 +1438,54 @@ public final class RecordingController {
             // 與錄音引擎可能短暫並存(macOS 允許同一顆麥多個客戶端)。
             // AUD-38 F1:開錄的 start 也算「切換中」——藍牙裝置要等保持器＋建引擎好幾秒,期間看門狗不計時、
             // 無聲警告不判,否則 3 秒就被當成死引擎重建。
-            let dev: AudioInputDevice?
-            if let sel = selectedInputDevice {
-                dev = sel
-            } else {
-                // AUD-39:只有沒選裝置時才在 main 查一次系統預設輸入,記耗時。
-                let t0 = Date()
-                dev = AudioDevices.defaultInputDevice()
-                os_log("MyParrot mic: 開錄未選裝置,查系統預設輸入 %ldms", Int(Date().timeIntervalSince(t0) * 1000))
-            }
-            isSwitchingMic = true
-            micSwapGeneration += 1
-            let gen = micSwapGeneration
-            scheduleSwitchTimeout(gen)
-            mic.start(deviceID: dev?.id, isBluetooth: dev?.isBluetooth ?? false) { [weak self] error in
-                Task { @MainActor in
-                    // 不用 stop 這個引擎:它就是 self.mic,停錄的 stop() 會處理。
-                    guard let self, gen == self.micSwapGeneration,
-                          self.state == .recording || self.state == .paused else { return }
-                    if let error {
-                        self.lastError = "麥克風啟動失敗：\(error)"
-                        self.finishMicSwitch(succeeded: false)
-                    } else {
-                        self.finishMicSwitch(succeeded: true)
+            // GATE-02(AA 節):DEBUG 設了回放檔就不起兩個裝置擷取(不需 TCC);release 永遠走裝置。
+            #if DEBUG
+            let replaying = try startReplayIfConfigured()
+            #else
+            let replaying = false
+            #endif
+            if !replaying {
+                let dev: AudioInputDevice?
+                if let sel = selectedInputDevice {
+                    dev = sel
+                } else {
+                    // AUD-39:只有沒選裝置時才在 main 查一次系統預設輸入,記耗時。
+                    let t0 = Date()
+                    dev = AudioDevices.defaultInputDevice()
+                    os_log("MyParrot mic: 開錄未選裝置,查系統預設輸入 %ldms", Int(Date().timeIntervalSince(t0) * 1000))
+                }
+                isSwitchingMic = true
+                micSwapGeneration += 1
+                let gen = micSwapGeneration
+                scheduleSwitchTimeout(gen)
+                mic.start(deviceID: dev?.id, isBluetooth: dev?.isBluetooth ?? false) { [weak self] error in
+                    Task { @MainActor in
+                        // 不用 stop 這個引擎:它就是 self.mic,停錄的 stop() 會處理。
+                        guard let self, gen == self.micSwapGeneration,
+                              self.state == .recording || self.state == .paused else { return }
+                        if let error {
+                            self.lastError = "麥克風啟動失敗：\(error)"
+                            self.finishMicSwitch(succeeded: false)
+                        } else {
+                            self.finishMicSwitch(succeeded: true)
+                        }
                     }
                 }
-            }
-            // AUD-39:對方軌 tap 非阻塞啟動(may fail without audio-capture permission — 失敗在 completion 回報,不擋錄音)。
-            // G4:開錄這次 start 也算「對方軌重建中」——看門狗不觸發、有 20 秒逾時。
-            isRebuildingSys = true
-            sysRebuildGeneration += 1
-            let sysGen = sysRebuildGeneration
-            scheduleSysRebuildTimeout(sysGen)
-            system.start { [weak self] error in
-                Task { @MainActor in
-                    guard let self, sysGen == self.sysRebuildGeneration else { return }
-                    self.isRebuildingSys = false
-                    if let error {
-                        self.lastError = "系統音訊擷取啟動失敗：\(error)"
-                    } else {
-                        self.lastSysLevelAt = Date(); self.lastSysSignalAt = Date()   // 同 finishSystemRebuild
+                // AUD-39:對方軌 tap 非阻塞啟動(may fail without audio-capture permission — 失敗在 completion 回報,不擋錄音)。
+                // G4:開錄這次 start 也算「對方軌重建中」——看門狗不觸發、有 20 秒逾時。
+                isRebuildingSys = true
+                sysRebuildGeneration += 1
+                let sysGen = sysRebuildGeneration
+                scheduleSysRebuildTimeout(sysGen)
+                system.start { [weak self] error in
+                    Task { @MainActor in
+                        guard let self, sysGen == self.sysRebuildGeneration else { return }
+                        self.isRebuildingSys = false
+                        if let error {
+                            self.lastError = "系統音訊擷取啟動失敗：\(error)"
+                        } else {
+                            self.lastSysLevelAt = Date(); self.lastSysSignalAt = Date()   // 同 finishSystemRebuild
+                        }
                     }
                 }
             }
@@ -1467,6 +1509,9 @@ public final class RecordingController {
         guard state == .recording else { return }
         accumulated += Date().timeIntervalSince(startDate)
         elapsed = accumulated
+        #if DEBUG
+        replay?.pause()   // GATE-02:同步停住回放(排空進行中的塊)再標 recorder 暫停,否則已送出的塊被丟、恢復後不重送(二審第二輪)
+        #endif
         recorder.isPaused = true
         state = .paused
         stopTicker()
@@ -1477,13 +1522,27 @@ public final class RecordingController {
         guard state == .paused else { return }
         startDate = Date()
         recorder.isPaused = false
+        #if DEBUG
+        replay?.resume()   // GATE-02:先解除 recorder 暫停、再放回放(二審第四輪:反過來 tick 可能在兩行之間插進來、塊被丟)
+        #endif
         state = .recording
         startTicker()
         writeOwnerState(sync: true)
     }
 
+    #if DEBUG
+    /// #2737:最近一次 stop() 的各步驟耗時(主執行緒同步工作),DebugControl `perf stop-phases` 讀。
+    public private(set) var lastStopPhases: StopPhaseProfile?
+    #endif
+
     public func stop() {
         guard state == .recording || state == .paused else { return }
+        #if DEBUG
+        var prof = StopPhaseProfile()
+        func lap(_ name: String) { prof.lap(name) }
+        #else
+        func lap(_ name: String) {}
+        #endif
         if state == .recording { accumulated += Date().timeIntervalSince(startDate) }
         stopTicker()
         endRecordingActivity()     // BUG-30
@@ -1493,9 +1552,14 @@ public final class RecordingController {
         micSwapGeneration += 1; isSwitchingMic = false; micFlowSince = nil
         inflightMics.forEach { $0.stop() }; inflightMics.removeAll()   // AUD-38 F5
         mic.stop()
+        #if DEBUG
+        replay?.stop(); replay = nil   // GATE-02
+        #endif
+        lap("devices")
         // TR-31(#2676):`live.stop(completion:)` 移到發布之後——completion 要抓到這筆 rec 與停止當下寫出的檔案內容。
         // 餵音已隨 mic/system 停了,引擎晚幾毫秒收尾沒有差別。
         recorder.stop()
+        lap("recorder")
         otherLevel = 0; youLevel = 0
         levelGeneration += 1                          // PERF-03 二審:已排在 main 上的舊批次世代不符 ⇒ 不會套進下一場
         levelCoalescer.withLock { _ = $0.flush() }   // PERF-03:丟掉窗內剩的,免得停錄後一批晚到把 0 蓋回去(applyLevels 也依 state 擋)
@@ -1504,7 +1568,9 @@ public final class RecordingController {
         // #949 REC-31:recorder 已 finalize ⇒ inprogress 原子發布到頂層 → 刪 inprogress 目錄 → 釋放租約。
         // 發布失敗:租約照放、檔案留在 inprogress 給收割規則復原(lastError 已設),這裡不建列表項。
         lastStoppedRecordingID = nil
-        if let url = publishAndEndLease() {
+        let published = publishAndEndLease()
+        lap("publish")
+        if let url = published {
             // 標題用檔名主幹(含日期時間、可能帶「 2」後綴),與 loadRecordings 重掃後一致——
             // 原本只放「錄音」,列表同時出現「錄音」與「2026-08-23 2228 錄音」兩種寫法。
             let rec = Recording(id: recordingIDs[url] ?? UUID(),
@@ -1530,7 +1596,9 @@ public final class RecordingController {
                 }
             }
             lateLiveFlush = (rec.id, finalLines.count, writtenAtStop)
+            lap("sidecar")
             convertToM4A(rec, autoTranscribe: transcribePolicy == .immediately)
+            lap("convertPrep")
             // #2483 E(TRX-07):閒置時才重轉 ⇒ 先進待轉清單,列表標「待高精度重轉」,每 30 秒看一次條件。
             if transcribePolicy == .whenIdle, engine == .whisperKit {
                 pendingHighAccuracy.insert(rec.id)
@@ -1538,6 +1606,7 @@ public final class RecordingController {
             }
         }
         state = .finished
+        lap("stateSet")
         scheduleWhisperUnload()   // TR-27:停止錄音後開始計閒置
         // TR-31(#2676):停止後句界才定稿的行(Apple 一句話接著靜音到停止、Whisper 尾塊)由引擎收進剛關的那一段,
         // 兩聲道收完或超時 15 秒在 main 回呼一次;這裡不等、不卡停止鈕。發布失敗(沒有 rec)⇒ 只收尾不補寫。
@@ -1554,6 +1623,11 @@ public final class RecordingController {
         } else {
             live.stop()
         }
+        lap("liveStop")
+        #if DEBUG
+        lastStopPhases = prof
+        os_log("MyParrot stop phases: %{public}@", prof.summary)
+        #endif
     }
 
     /// TR-31:停止當下留給 `live.stop(completion:)` 的上下文——這筆 rec、停止時已落檔的定稿行數、寫出的 `.txt`／`.srt` 內容。

@@ -38,6 +38,18 @@ extension SelfTest {
         // 系統提示分語言、都講 JSON
         let zh = MinutesPrompt.system(for: .zhTW), en = MinutesPrompt.system(for: .en)
         if zh == en || !zh.contains("JSON") || !en.contains("JSON") || !zh.contains(MinutesPrompt.notesMarker) { fails.append("系統提示語言/標記不對") }
+        // AFM-13(#2667):`isChinese` 是 AFM 後端挑 @Guide 描述語言的唯一判準,逐語言釘它等於兩個 system prompt 的 zh 分支(分歧就紅,不靜默)。
+        let corrZh = CorrectionPrompt.system(for: .zhTW)
+        for lang in TranscriptionLanguage.allCases {
+            let minutesIsZh = MinutesPrompt.system(for: lang) == zh
+            let correctionIsZh = CorrectionPrompt.system(for: lang) == corrZh
+            if lang.isChinese != minutesIsZh || lang.isChinese != correctionIsZh {
+                fails.append("\(lang.rawValue) isChinese=\(lang.isChinese) 與 system prompt 分支不一致(minutes \(minutesIsZh)、correction \(correctionIsZh))")
+            }
+        }
+        if !TranscriptionLanguage.zhTW.isChinese || !TranscriptionLanguage.zhCN.isChinese || TranscriptionLanguage.en.isChinese || TranscriptionLanguage.ja.isChinese {
+            fails.append("isChinese 基本值錯")
+        }
         // MIN-01:參數九旗標、schema 就是 MinutesPrompt.schema、禁用旗標無、--tools 非空、model 有填才帶
         let args = ClaudeCLIMinutesProvider.arguments(userPrompt: user, systemPrompt: "S", model: nil)
         let joined = args.joined(separator: " ")

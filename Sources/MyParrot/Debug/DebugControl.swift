@@ -27,6 +27,8 @@ enum DebugControl {
     private static var uiState: AppUIState?
     private static var windowMode: WindowModeManager?
     private static var installed = false
+    /// GATE-03:`notes type` 進行中(二審:重入會交錯插字)。
+    private static var typingInProgress = false
 
     static func install(controller: RecordingController, updates: UpdateChecker,
                         uiState: AppUIState, windowMode: WindowModeManager) {
@@ -95,8 +97,51 @@ enum DebugControl {
                 }
                 Thread.sleep(forTimeInterval: Double(ms) / 1000)   // 故意的:量「主執行緒卡 N ms」有沒有被偵測器記到
                 write(["ok": true, "blockedMs": ms], to: out)
+            case "storm":
+                // GATE-05 正控(AA 節):DecorTicker 催到每秒 N 次(預設 120)⇒ 重現修前「高頻狀態變動 ⇒ 每幀整窗 pass」;閘的 render／CPU 要量到紅。off 還原 10 Hz。
+                let arg = params.count >= 2 ? params[1] : "120"
+                if arg == "off" {
+                    DecorTickerDebug.hz = nil; write(["ok": true, "storm": false], to: out)
+                } else if let hz = Double(arg), (1...240).contains(hz) {
+                    DecorTickerDebug.hz = hz; write(["ok": true, "storm": true, "hz": hz], to: out)
+                } else {
+                    write(["ok": false, "error": "usage: perf storm <1-240 hz>|off"], to: out)
+                }
+            case "stop-phases":
+                // #2737:最近一次 stop() 各步驟耗時＋狀態列項目更新耗時(都是主執行緒同步工作);沒停過 ⇒ phases 空陣列。
+                var d: [String: Any] = ["ok": true, "phases": [[String: Any]](), "totalMs": 0.0]
+                if let p = c.lastStopPhases {
+                    d["totalMs"] = p.totalMs
+                    d["phases"] = p.laps.map { ["name": $0.name, "ms": $0.ms] as [String: Any] }
+                }
+                if let ind = RecordingIndicator.lastUpdate { d["indicator"] = ["action": ind.action, "ms": ind.ms] as [String: Any] }
+                write(d, to: out)
             default:
-                write(["ok": false, "error": "usage: perf stalls|reset|block <ms>"], to: out)
+                write(["ok": false, "error": "usage: perf stalls|reset|block <ms>|storm <hz>|off|stop-phases"], to: out)
+            }
+        case "replay":
+            // GATE-02(AA 節):錄音回放源。set <音檔> ⇒ 下一次開錄不起裝置、改由檔案丟 buffer(左＝對方、右＝你);
+            // clear ⇒ 回到真裝置;status ⇒ 目前設定、這場是否在回放、是否播完。只在 DEBUG 存在。
+            switch params.first ?? "status" {
+            case "set":
+                guard params.count >= 2 else { write(["ok": false, "error": "usage: replay set <audio file>"], to: out); return }
+                let u = URL(fileURLWithPath: params.dropFirst().joined(separator: " "))
+                guard FileManager.default.fileExists(atPath: u.path) else { write(["ok": false, "error": "no such file: \(u.path)"], to: out); return }
+                c.replayURL = u
+                write(["ok": true, "replay": u.path], to: out)
+            case "clear":
+                c.replayURL = nil
+                write(["ok": true, "replay": ""], to: out)
+            case "status":
+                let rs = c.replayStatus
+                // configuredReplay＝下一場會用的(set/clear 改的);activeReplay＝這一場正在播的(錄音中改設定不影響它)。"replay" 保留＝configured。
+                write(["ok": true, "replay": c.replayURL?.path ?? "", "configuredReplay": c.replayURL?.path ?? "",
+                       "activeReplay": rs?.url.path ?? "", "appliesTo": "nextRecording",
+                       "active": rs != nil, "finished": rs?.finished ?? false, "error": rs?.error ?? "",
+                       "sentChunks": rs?.sentChunks ?? 0, "totalChunks": rs?.totalChunks ?? 0,
+                       "maxLateMs": rs?.maxLateMs ?? 0, "state": "\(c.state)"], to: out)
+            default:
+                write(["ok": false, "error": "usage: replay set <file>|clear|status"], to: out)
             }
         case "record":
             c.startRecording(); write(["ok": true, "state": "\(c.state)"], to: out)
@@ -663,8 +708,33 @@ enum DebugControl {
             case "path":
                 write(["ok": true, "path": n.store.url?.path ?? "", "draft": n.isDraft, "stem": n.stem?.path ?? "",
                        "locked": n.lockedStem?.path ?? "", "writeCount": n.store.writeCount], to: out)
+            case "type":
+                // GATE-03(AA 節):模擬打字——以每秒 cps 字的節拍對筆記 NSTextView 呼叫 insertText(跟鍵盤同一條
+                // textDidChange→套色防抖→存檔路);量 PERF-06 打字路徑時 watchdog 照常計 stall。模擬不到 IME 組字(hasMarkedText 分支仍靠真人)。
+                // 用法:notes type <text…> [cps];結果檔立刻寫(chars／cps／etaSeconds),打完要等 etaSeconds。
+                guard let tv = n.proxy.textView else { write(["ok": false, "error": "notes editor not on screen"], to: out); return }
+                guard !typingInProgress else { write(["ok": false, "error": "typing in progress"], to: out); return }   // 二審:不准重入交錯插字
+                var words = Array(params.dropFirst())
+                var cps = 8.0
+                if words.count >= 2, let last = words.last, let v = Double(last) { cps = max(0.5, min(50, v)); words.removeLast() }
+                let text = words.joined(separator: " ").replacingOccurrences(of: "\\n", with: "\n")
+                guard !text.isEmpty else { write(["ok": false, "error": "usage: notes type <text> [cps]"], to: out); return }
+                tv.window?.makeFirstResponder(tv)
+                let chars = Array(text)
+                let interval = 1.0 / cps
+                typingInProgress = true
+                Task { @MainActor in
+                    defer { typingInProgress = false }
+                    for ch in chars {
+                        guard let tv = n.proxy.textView else { os_log(.error, "MyParrot debug: notes type 中編輯器消失,提前結束"); return }
+                        tv.insertText(String(ch), replacementRange: tv.selectedRange())
+                        do { try await Task.sleep(for: .milliseconds(Int(interval * 1000))) } catch { return }
+                    }
+                }
+                // chars 以 Swift Character 計(emoji／組合字算一個、一次 insertText),不是鍵擊數;IME 組字模擬不到。
+                write(["ok": true, "chars": chars.count, "cps": cps, "etaSeconds": interval * Double(chars.count)], to: out)
             default:
-                write(["ok": false, "error": "notes get|set <text>|append <md>|mark|quote <idx>|flush|path"], to: out)
+                write(["ok": false, "error": "notes get|set <text>|append <md>|mark|quote <idx>|flush|path|type <text> [cps]"], to: out)
             }
         case "files":
             switch params.first {

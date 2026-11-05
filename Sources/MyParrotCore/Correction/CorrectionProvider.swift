@@ -84,8 +84,8 @@ public enum CorrectionError: Error, Sendable, Equatable {
 /// 使用者訊息列段落。
 public enum CorrectionPrompt {
     public static func system(for language: TranscriptionLanguage) -> String {
-        switch language.resolved().language.languageCode?.identifier {
-        case "zh":
+        switch language.isChinese {   // AFM-13:與 AFM 後端的 @Guide 描述共用同一個判準
+        case true:
             return "你是會議逐字稿的校對助手。只做一件事:找出語音辨識最可能聽錯的詞並提出修正建議,不重寫句子、不加內容。original 必須是該段原文裡一字不差、連續出現的文字,只包含要改的詞,越短越好;suggestion 是改正後的文字;reason 用一句話。沒有把握的地方不要提。"
         default:
             return "You proofread meeting transcripts produced by speech recognition. Do one thing only: find the words most likely misheard and suggest corrections. Do not rewrite sentences or add content. \"original\" must appear exactly and contiguously in that segment, containing only the words to fix, as short as possible; \"suggestion\" is the corrected text; \"reason\" is one sentence. Skip anything you are not sure about."
@@ -93,7 +93,7 @@ public enum CorrectionPrompt {
     }
 
     public static func user(segments: [String], range: Range<Int>, language: TranscriptionLanguage) -> String {
-        let isZh = language.resolved().language.languageCode?.identifier == "zh"
+        let isZh = language.isChinese
         let head = isZh
             ? "下面是語音辨識出的會議逐字稿,每段前面是段號。找出最可能聽錯的地方並提出修正,只回 JSON。"
             : "Below is a speech-recognition transcript of a meeting; each line starts with its segment number. Find the most likely mishearings and suggest corrections. Reply with JSON only."

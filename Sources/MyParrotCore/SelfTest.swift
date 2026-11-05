@@ -134,6 +134,7 @@ public enum SelfTest {
             micSilentWarningByAuthorization(), // PERM-04 #2673
             sysSilentBannerSplit(),            // PERM-05 #2673
             uiRefreshThrottle(),               // PERF-01 Z 節(案例在 SelfTest+Perf.swift)
+            replayPlan(),                      // GATE-01 AA 節(案例在 SelfTest+Replay.swift)
             masBuildFlavor(),
             masBookmarkStateMachine(),
             masRegistryWithoutCLI(),
