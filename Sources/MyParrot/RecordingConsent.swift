@@ -17,9 +17,11 @@ enum RecordingConsent {
     static var isPresented: Bool { pending != nil }
 
     /// 看過 ⇒ 直接 proceed;沒看過 ⇒ 有可見視窗就掛 sheet,沒有(迷你／關窗)就 runModal;同意才 proceed。
-    static func confirmThen(_ proceed: @escaping @MainActor () -> Void) {
-        if shown { proceed(); return }
-        guard pending == nil else { return }   // 二審:框還掛著時連按(快捷鍵／鈕／通知)不再掛第二個
+    /// 回 false＝框已掛著、這次請求丟掉(PERM 二審第三輪:RecordingGate 要把真值傳到底,不能自己回 true)。
+    @discardableResult
+    static func confirmThen(_ proceed: @escaping @MainActor () -> Void) -> Bool {
+        if shown { proceed(); return true }
+        guard pending == nil else { return false }   // 二審:框還掛著時連按(快捷鍵／鈕／通知)不再掛第二個
         let alert = NSAlert()
         alert.messageText = L("錄音前請先告知對方")
         alert.informativeText = L("依所在地法律，錄音可能需要取得對方同意。這個提醒只會出現一次。")
@@ -38,6 +40,7 @@ enum RecordingConsent {
             markShown()
             proceed()
         }
+        return true
     }
 
     /// DebugControl:回答掛著的 sheet(等同按鈕)。沒有掛著 ⇒ false。

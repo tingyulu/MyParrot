@@ -10,12 +10,13 @@ import MyParrotCore
 /// 🚫 全檔不用 `.shadow`(memory swiftui-shadow-paint-crash);發光與落影用 Canvas 模糊圖層與模糊副本。
 struct DialView: View {
     @Bindable var controller: RecordingController
+    /// PERF-02／03:遙控器根的 10 Hz 時鐘。紅光相位、電平環(`controller.peekMeter()`)都在 tick 時讀,電平更新本身不觸發 pass。
+    var tick: Date = .distantPast
+    /// 時鐘在動(錄音中且非 reduceMotion);false ⇒ 紅光固定 0.6。
+    var animating: Bool = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
     private var isDark: Bool { colorScheme == .dark }
-    @State private var pulse = false
-    @State private var peakOther = PeakHold()
-    @State private var peakYou = PeakHold()
 
     static let size: CGFloat = 176
     static let centerSize: CGFloat = 136
@@ -35,22 +36,23 @@ struct DialView: View {
             Circle().strokeBorder(LinearGradient(colors: [.clear, .white.opacity(isDark ? 0.08 : 0.7)],
                                                  startPoint: UnitPoint(x: 0.5, y: 0.5), endPoint: .bottom), lineWidth: 1)
             Circle().strokeBorder(RemoteTheme.dialRim, lineWidth: 1)
-            LEDRing(other: live ? MeterScale.segments(controller.otherLevel, of: Self.segments) : 0,
-                    you: live ? MeterScale.segments(controller.youLevel, of: Self.segments) : 0,
-                    peakOther: live ? peakOther.held : 0, peakYou: live ? peakYou.held : 0, glow: !reduceMotion)
+            ledRing
             centerDisc
         }
         .frame(width: Self.size, height: Self.size)
         // 盤外下緣 1pt 亮邊(mockup 0 1px 0 white):同心白圈往下挪 1pt,只露出底下那一弧
         .background(Circle().stroke(Color.white.opacity(isDark ? 0.35 : 0.8), lineWidth: 1).offset(y: 1))
-        .onChange(of: controller.otherLevel) { _, v in peakOther.update(MeterScale.segments(v, of: Self.segments)) }
-        .onChange(of: controller.youLevel) { _, v in peakYou.update(MeterScale.segments(v, of: Self.segments)) }
-        .onAppear { updatePulse() }
-        .onChange(of: controller.state) { _, _ in
-            updatePulse()
-            peakOther = PeakHold(); peakYou = PeakHold()   // 停錄／新錄音:峰值歸零(停錄後沒有新電平事件,否則會停在最後一格)
-        }
-        .onChange(of: reduceMotion) { _, _ in updatePulse() }
+    }
+
+    /// 電平環:每個 tick 讀一次快照(峰值保持 1.5 s 在 Core 的 `MeterSnapshot` 裡算;停錄時 Core 歸零)。
+    /// `tick` 只是讓 body 跟時鐘走;值本身來自 `peekMeter()`,不經 Observation。
+    private var ledRing: some View {
+        let m = live ? controller.peekMeter() : MeterSnapshot()
+        _ = tick
+        return LEDRing(other: MeterScale.segments(m.other, of: Self.segments),
+                       you: MeterScale.segments(m.you, of: Self.segments),
+                       peakOther: MeterScale.segments(m.otherPeak.held, of: Self.segments),
+                       peakYou: MeterScale.segments(m.youPeak.held, of: Self.segments), glow: !reduceMotion)
     }
 
     // MARK: 中央黑曜石
@@ -77,9 +79,9 @@ struct DialView: View {
         .overlay(Circle().stroke(Color.black.opacity(isDark ? 0 : 0.10), lineWidth: 1).allowsHitTesting(false))
         .overlay {
             if controller.state == .recording {
-                // 錄音中外緣 2pt 紅光脈動(opacity 0.45↔0.75;reduceMotion 固定 0.6)
+                // 錄音中外緣 2pt 紅光脈動(opacity 0.45↔0.75;reduceMotion 固定 0.6)。PERF-02:遙控器根的 10 Hz 時鐘查相位,不用 repeatForever。
                 Circle().stroke(RemoteTheme.pulseRed, lineWidth: 2)
-                    .opacity(reduceMotion ? 0.6 : (pulse ? 0.75 : 0.45))
+                    .opacity(animating ? 0.45 + 0.30 * DecorClock.eased(DecorClock.triangle(at: tick, period: 1.6)) : 0.6)
                     .allowsHitTesting(false)
             }
         }
@@ -110,7 +112,7 @@ struct DialView: View {
         switch controller.state {
         case .idle:
             wholeKey(icon: "record.circle", tint: RemoteTheme.recordGlyph, label: L("開始錄音"), badge: "⌘R", key: "r") {
-                RecordingConsent.confirmThen { controller.startRecording() }   // MAS-17:首次一次性提示
+                RecordingGate.confirmThen(controller) { controller.startRecording() }   // MAS-17 首次一次性提示＋PERM-03 麥克風被拒閘
             }
         case .finished:
             wholeKey(icon: "plus", tint: RemoteTheme.plusGlyph, label: L("新錄音"), badge: "⌘N", key: "n") {
@@ -187,27 +189,9 @@ struct DialView: View {
         }
     }
 
-    private func updatePulse() {
-        guard controller.state == .recording, !reduceMotion else {
-            var t = Transaction(); t.disablesAnimations = true
-            withTransaction(t) { pulse = false }
-            return
-        }
-        withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) { pulse = true }
-    }
 }
 
-/// 峰值保持:比目前亮段高的峰值停 1.5 秒再掉下來(畫 0.45 不透明度的段)。
-struct PeakHold: Equatable {
-    var held = 0
-    var since = Date.distantPast
-    mutating func update(_ lit: Int, now: Date = Date()) {
-        if lit >= held || now.timeIntervalSince(since) > 1.5 {
-            held = lit
-            since = now
-        }
-    }
-}
+// 峰值保持(比目前亮段高的峰值停 1.5 秒再掉下來,畫 0.45 不透明度的段)PERF-03 起住在 Core `MeterPeakHold`／`MeterSnapshot`。
 
 /// C1 霓虹 LED 環:左右各 20 段弧(半徑 80、線寬 11、每段 9°、段間 2.8°),由盤底往上長;
 /// 每半最上 3 段琥珀;亮段的光暈＝Canvas 圖層加 blur 再畫一次(reduceMotion 不畫)。

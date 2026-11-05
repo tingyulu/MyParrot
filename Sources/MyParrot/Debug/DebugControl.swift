@@ -40,6 +40,20 @@ enum DebugControl {
         }
     }
 
+    /// PERM-11(二審第二、三輪):沙盒 build 的結果檔只放行**錄音夾下的 `_ctl/` 子夾**,不是整個錄音夾樹(否則 DEBUG 通道能覆寫任何錄音／sidecar)。
+    /// 子夾不在就先建(建不起來 ⇒ 不放行,指令會被拒、stderr 有話);`_ctl` 若是 symlink(可指到錄音夾外)也不放行。
+    private static var debugResultRoots: [String] {
+        guard let dir = controller?.recordingsDir.standardizedFileURL.resolvingSymlinksInPath() else { return [] }
+        let ctl = dir.appendingPathComponent("_ctl", isDirectory: true)
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        if !fm.fileExists(atPath: ctl.path, isDirectory: &isDir) {
+            guard (try? fm.createDirectory(at: ctl, withIntermediateDirectories: false)) != nil else { return [] }
+        } else if !isDir.boolValue { return [] }
+        if (try? ctl.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true { return [] }
+        return [ctl.path]
+    }
+
     // MARK: - 指令
 
     /// 第一個參數＝指令;最後一個參數＝結果檔路徑(每個指令都要給,壞指令也會寫錯誤進去)。
@@ -48,7 +62,9 @@ enum DebugControl {
         // snapshot／window-shot 的「結果檔」是圖本身＝第 2 個參數(後面可接選項);其他指令是最後一個參數。
         let imageFirst = cmd == "snapshot" || cmd == "window-shot"
         let outCandidate: String? = imageFirst ? (args.count >= 2 ? args[1] : nil) : args.last
-        guard args.count >= 2, let out = outCandidate, DebugCommand.isAllowedResultPath(out) else {
+        // PERM-11:沙盒 build 下結果檔／截圖也可以寫進目前錄音夾(外面的腳本唯一讀得到、app 唯一寫得進的共同位置)。
+        guard args.count >= 2, let out = outCandidate,
+              DebugCommand.isAllowedResultPath(out, extraRoots: debugResultRoots) else {
             // 沒有合法結果檔就沒地方回報;只在 stderr 留一行,不做任何動作。
             FileHandle.standardError.write(Data("[debug] rejected: \(cmd) (result path missing or not allowed)\n".utf8))
             return
@@ -65,6 +81,23 @@ enum DebugControl {
         switch cmd {
         case "state":
             write(state(c, ui, wm), to: out)
+        case "perf":
+            // PERF-07(#2549):主執行緒卡頓偵測器讀數。stalls＝讀數;reset＝歸零;block <ms>＝故意卡主執行緒 N ms(正控:要被記到)。
+            switch params.first ?? "stalls" {
+            case "stalls":
+                var d = MainThreadWatchdog.shared.snapshot(); d["ok"] = true; d["state"] = "\(c.state)"
+                write(d, to: out)
+            case "reset":
+                MainThreadWatchdog.shared.reset(); write(["ok": true], to: out)
+            case "block":
+                guard params.count >= 2, let ms = Int(params[1]), (1...5000).contains(ms) else {
+                    write(["ok": false, "error": "usage: perf block <1-5000 ms>"], to: out); return
+                }
+                Thread.sleep(forTimeInterval: Double(ms) / 1000)   // 故意的:量「主執行緒卡 N ms」有沒有被偵測器記到
+                write(["ok": true, "blockedMs": ms], to: out)
+            default:
+                write(["ok": false, "error": "usage: perf stalls|reset|block <ms>"], to: out)
+            }
         case "record":
             c.startRecording(); write(["ok": true, "state": "\(c.state)"], to: out)
         case "pause":
@@ -293,6 +326,54 @@ enum DebugControl {
             c.revalidateRecordingsFolder()
             write(["ok": true, "isMAS": BuildFlavor.isMAS, "bookmarkURLStart": a, "rebuiltURLStart": b, "stale": stale,
                    "restored": String(describing: c.recordingsFolderState)], to: out)
+        case "perm":
+            // PERM-11(#2673):state | refresh | override mic|speech denied|notDetermined|restricted|authorized|clear
+            // override 只蓋 Core 讀到的四態(不碰 TCC),讓拒絕路徑的橫幅／gate 不靠真拒權限就能驗;真拒絕留給 PERM-09／10 真機。
+            switch params.first {
+            case "state", nil: break
+            case "refresh": c.refreshPermissionStatus()
+            case "override":
+                guard params.count >= 3, ["mic", "speech"].contains(params[1]) else {
+                    write(["ok": false, "error": "usage: perm override mic|speech denied|notDetermined|restricted|authorized|clear"], to: out); return
+                }
+                let value: PermissionState?
+                if params[2] == "clear" { value = nil } else if let v = PermissionState(rawValue: params[2]) { value = v } else {
+                    write(["ok": false, "error": "bad state \(params[2])"], to: out); return
+                }
+                if params[1] == "mic" { c.debugPermissionOverride.mic = value } else { c.debugPermissionOverride.speech = value }
+            default: write(["ok": false, "error": "usage: perm state|refresh|override …"], to: out); return
+            }
+            write(["ok": true,
+                   "mic": c.micAuthorization.rawValue, "speech": c.speechAuthorization.rawValue,
+                   "speechNeeded": c.liveEngineNeedsSpeechAuthorization,
+                   "micPermission": c.micPermission, "speechPermission": c.speechPermission,
+                   "override": ["mic": c.debugPermissionOverride.mic?.rawValue ?? "nil", "speech": c.debugPermissionOverride.speech?.rawValue ?? "nil"],
+                   "gateBlocks": PermissionHints.recordGateBlocks(mic: c.micAuthorization),
+                   "gatePresented": PermissionGate.isPresented,
+                   "hints": c.permissionHints.map { h -> [String: Any] in
+                       var d: [String: Any] = ["kind": h.kind.rawValue, "template": h.template]
+                       switch h.action {
+                       case .request: d["action"] = "request"
+                       case .openSystemSettings(let pane): d["action"] = "openSystemSettings"; d["pane"] = pane
+                       }
+                       return d
+                   }], to: out)
+        case "perm-gate":
+            // PERM-03:show(走真的 gate,被拒會掛三鈕框、沒被拒直接走同意框)| settings | proceed | cancel(回答掛著的框)
+            switch params.first {
+            case "show":
+                // 二審第二輪:gate 框已掛著 ⇒ 請求被丟掉,要回 ok:false,不能寫成功。
+                if !RecordingGate.confirmThen(c, { c.startRecording() }) { write(["ok": false, "error": "gate already presented", "gatePresented": true], to: out); return }
+            case "settings", "proceed", "cancel":
+                if !PermissionGate.respond(PermissionGate.Choice(rawValue: params[0])!) { write(["ok": false, "error": "no gate sheet"], to: out); return }
+                // 二審第三輪:endSheet 的 completion 不保證同步,狀態延到下一輪 main loop 再寫,不回舊值。
+                DispatchQueue.main.async { MainActor.assumeIsolated {
+                    write(["ok": true, "gatePresented": PermissionGate.isPresented, "consentPresented": RecordingConsent.isPresented, "state": "\(c.state)"], to: out)
+                } }
+                return
+            default: write(["ok": false, "error": "usage: perm-gate show|settings|proceed|cancel"], to: out); return
+            }
+            write(["ok": true, "gatePresented": PermissionGate.isPresented, "consentPresented": RecordingConsent.isPresented, "state": "\(c.state)"], to: out)
         case "consent":
             // MAS-17:status | reset(下次按錄音再跳)| show(走真的提示,同意會開錄)| accept | cancel(回答掛著的 sheet)
             switch params.first {
@@ -566,7 +647,7 @@ enum DebugControl {
                 n.appendBlock(params.dropFirst().joined(separator: " ").replacingOccurrences(of: "\\n", with: "\n"))
                 write(["ok": true, "length": (n.store.text as NSString).length], to: out)
             case "mark":
-                ui.addMarker(at: c.elapsed)
+                ui.addMarker(at: c.elapsedExact)
                 write(["ok": true, "text": n.store.text, "markers": ui.markers.count], to: out)
             case "quote":
                 guard let i = params.dropFirst().first.flatMap({ Int($0) }), i >= 0, i < c.liveTranscript.count else {
@@ -713,7 +794,7 @@ enum DebugControl {
         [
             "ok": true,
             "state": "\(c.state)",
-            "elapsed": c.elapsed,
+            "elapsed": c.elapsed, "elapsedExact": c.elapsedExact,
             "otherLevel": Double(c.otherLevel), "youLevel": Double(c.youLevel),
             "otherHasSignal": c.sysHasSignal, "youHasSignal": c.micHasSignal,
             "isSwitchingMic": c.isSwitchingMic,                       // AUD-38
@@ -1111,8 +1192,13 @@ enum DebugControl {
     }
 
     private static func write(_ obj: [String: Any], to path: String) {
-        guard DebugCommand.isAllowedResultPath(path),
-              let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]) else { return }
+        // PERM-11:跟 handle() 同一份白名單(含目前錄音夾),否則只靠 extraRoots 放行的結果檔會在這裡被靜默丟掉。
+        guard DebugCommand.isAllowedResultPath(path, extraRoots: debugResultRoots) else {
+            FileHandle.standardError.write(Data("[debug] result path rejected: \(path)\n".utf8)); return   // 二審:不無聲吞
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]) else {
+            FileHandle.standardError.write(Data("[debug] result not JSON-serializable for \(path)\n".utf8)); return
+        }
         do {
             try data.write(to: URL(fileURLWithPath: path), options: .atomic)
         } catch {

@@ -169,19 +169,33 @@ struct WorkspaceView: View {
             HStack(spacing: MP.spS) {
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                 // BUG-28:Core 只給「哪一種警示+參數」,這裡依介面語言組字。
+                // PERM-05:長警示配上右側的鈕後兩行放不下,SwiftUI 會截成「…」;讓 Text 拿它需要的高度(只縱向)。
                 Text(warn.localized).font(MPFont.caption).foregroundStyle(.orange).lineSpacing(3)
+                    .fixedSize(horizontal: false, vertical: true)
                 Spacer()
+                // PERM-05(#2673):可行動的鈕(非藍牙輸出的對方軌無聲 ⇒ 開啟系統設定的「系統音訊錄製」分頁)。
+                if case .openSystemSettings(let pane) = warn.action {
+                    Button(L("開啟系統設定")) { if !SystemSettingsOpener.open(pane) { controller.lastError = SystemSettingsOpener.failureMessage } }.font(MPFont.caption)
+                }
                 Button { controller.warning = nil } label: { Image(systemName: "xmark") }
                     .buttonStyle(.plain)
             }
             .mpBanner(color: .orange)
         }
-        if !controller.micPermission || !controller.speechPermission {
+        // PERM-02(#2673):取代原本「需要麥克風 / 語音辨識 / 系統音訊權限 [授權]」三合一橫幅——每個權限一列、依四態給對的出口:
+        // 未問過 ⇒「授權」(會跳系統框);已拒絕／受限 ⇒「開啟系統設定」(再請求沒反應);已授權 ⇒ 不出現。系統音訊查不到就不列。
+        ForEach(controller.permissionHints) { hint in
             HStack(spacing: MP.spS) {
                 Image(systemName: "lock.shield").foregroundStyle(MP.blue)
-                Text(L("需要麥克風 / 語音辨識 / 系統音訊權限")).font(MPFont.caption).foregroundStyle(.secondary).lineSpacing(3)
+                Text(L(hint.template)).font(MPFont.caption).foregroundStyle(.secondary).lineSpacing(3)
+                    .fixedSize(horizontal: false, vertical: true)
                 Spacer()
-                Button(L("授權")) { Task { await controller.requestPermissions() } }.font(MPFont.caption)
+                switch hint.action {
+                case .request:
+                    Button(L("授權")) { Task { await controller.requestPermission(hint.kind) } }.font(MPFont.caption)   // 二審:只請自己這個
+                case .openSystemSettings(let pane):
+                    Button(L("開啟系統設定")) { if !SystemSettingsOpener.open(pane) { controller.lastError = SystemSettingsOpener.failureMessage } }.font(MPFont.caption)
+                }
             }
             .mpBanner(color: MP.blue)
         }

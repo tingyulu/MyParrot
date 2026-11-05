@@ -121,4 +121,17 @@ struct SelfTestCases {
     @Test("MAS-14 登錄表不列 CLI 後端") func masRegistryWithoutCLI() { check(SelfTest.masRegistryWithoutCLI()) }
     @Test("MAS-14 外部指令在商店版忽略") func masExternalCommandIgnored() { check(SelfTest.masExternalCommandIgnored()) }
     @Test("MAS-12 模型 SHA-256 閘") func whisperChecksumGate() { check(SelfTest.whisperChecksumGate()) }
+    // PERM #2673:權限被拒引導純決策(案例在 SelfTest+Permissions.swift)
+    @Test("PERM-02 錄音前權限橫幅決策") func permissionHintDecision() { check(SelfTest.permissionHintDecision()) }
+    @Test("PERM-04 麥克風被拒時不怪裝置") func micSilentWarningByAuthorization() { check(SelfTest.micSilentWarningByAuthorization()) }
+    @Test("PERM-05 對方軌無聲警告分流") func sysSilentBannerSplit() { check(SelfTest.sysSilentBannerSplit()) }
+    // PERF Z 節(2026-11-04):錄音中 UI 節流的純函式(案例在 SelfTest+Perf.swift)
+    @Test("PERF-01 UI 更新節流(秒、電平合併、相位)") func uiRefreshThrottle() { check(SelfTest.uiRefreshThrottle()) }
+    // TR-29 #2672:即時稿行緩衝(案例在 SelfTest+LiveLines.swift)
+    @Test("TR-29 即時稿行緩衝換代") func liveLineBuffer() { check(SelfTest.liveLineBuffer()) }
+    // TR-31 #2676:停止後晚到的定稿分流與收尾恰好一次(案例在 SelfTest+LiveLines.swift)
+    @Test("TR-31 即時稿收尾分流") func liveLineStore() { check(SelfTest.liveLineStore()) }
+    @Test("TR-31 收尾恰好一次(OnceJoin)") func onceJoin() { check(SelfTest.onceJoin()) }
+    @Test("TR-31 停止後補寫決策") func lateLiveFlushDecision() { check(SelfTest.lateLiveFlushDecision()) }
+    @Test("TR-31 逐字稿成對寫入") func sidecarPairWrite() { check(SelfTest.sidecarPairWrite()) }
 }

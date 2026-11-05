@@ -57,6 +57,8 @@ public actor WhisperCppEngine {
 
     /// 轉寫 16kHz mono Float 樣本。languageCode = whisper 語碼("zh"/"en"/…),
     /// nil = 自動偵測。prompt 用於中文引導繁體與語境(transcribe.sh 同款)。
+    /// PERF-10(Z 節,Eric B1)11/04 真路徑試過 `audio_ctx` 依塊長縮窗＋`single_segment`:large-v3＋Metal＋flash_attn 下
+    /// `single_segment` 吐亂碼且每塊 15 s,只縮 `audio_ctx` 每塊 1.35 s 對 1.18 s 沒有變快 ⇒ 不採,維持全窗(證據 TEST_REPORT「11/04 PERF」)。
     public func transcribe(samples16k: [Float],
                            languageCode: String?,
                            prompt: String?) throws -> [Segment] {

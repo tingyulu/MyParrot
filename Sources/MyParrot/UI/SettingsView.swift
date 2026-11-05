@@ -147,8 +147,15 @@ struct SettingsView: View {
                 } header: { Text(L("存檔")) }
 
                 Section {
-                    LabeledContent(L("麥克風")) { statusDot(controller.micPermission) }
-                    LabeledContent(L("語音辨識")) { statusDot(controller.speechPermission) }
+                    // PERM-07(#2673):未授權時旁邊給「開啟系統設定」(行事曆區段同款);系統音訊錄製查不到狀態 ⇒ 常駐出口。
+                    permissionRow(L("麥克風"), state: controller.micAuthorization, pane: PermissionKind.microphone.settingsPane)
+                    permissionRow(L("語音辨識"), state: controller.speechAuthorization, pane: PermissionKind.speech.settingsPane)
+                    LabeledContent(L("系統音訊錄製")) {
+                        HStack(spacing: MP.spS) {
+                            Text(L("無法查詢 — 拒絕時對方軌會沒有聲音")).foregroundStyle(.secondary)
+                            Button(L("開啟系統設定")) { if !SystemSettingsOpener.open(PermissionKind.systemAudio.settingsPane) { controller.lastError = SystemSettingsOpener.failureMessage } }
+                        }
+                    }
                     Button(L("重新請求權限")) { Task { await controller.requestPermissions() } }
                 } header: { Text(L("權限")) }
 
@@ -257,6 +264,16 @@ struct SettingsView: View {
     }
 
     private func chooseDir() { RecordingsFolderPicker.present(controller: controller) }   // MAS-06:與首啟提示共用
+
+    /// PERM-07:四態 ⇒ 綠／橘點＋已拒絕／受限時的「開啟系統設定」。
+    private func permissionRow(_ label: String, state: PermissionState, pane: String) -> some View {
+        LabeledContent(label) {
+            HStack(spacing: MP.spS) {
+                statusDot(state == .authorized)
+                if state.isBlocked { Button(L("開啟系統設定")) { if !SystemSettingsOpener.open(pane) { controller.lastError = SystemSettingsOpener.failureMessage } } }
+            }
+        }
+    }
 
     private func statusDot(_ ok: Bool) -> some View {
         HStack(spacing: MP.spS) {

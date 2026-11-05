@@ -55,7 +55,7 @@ struct MyParrotApp: App {
                 uiState.onMarkersChanged = { [controller] n in controller.markerCount = n }
                 // #949 REC-36:CLI 送來的 `mark` 指令(Core 沒有標記方法)走 App 的 ⌘⇧M 同一條路。
                 controller.onExternalCommand = { [uiState, controller] cmd in
-                    if cmd.cmd == "mark" { uiState.addMarker(at: controller.elapsed) }
+                    if cmd.cmd == "mark" { uiState.addMarker(at: controller.elapsedExact) }
                 }
                 // #2438 M5:筆記／會議記錄 session(草稿、sidecar、自動存檔)。
                 if uiState.notes == nil { uiState.notes = NotesSession(recordingsDir: controller.recordingsDir) }
@@ -69,6 +69,7 @@ struct MyParrotApp: App {
                 #if DEBUG
                 // #2412:只有 DEBUG 建置才裝控制通道(驗證腳本用;release 連這行都不編)。
                 DebugControl.install(controller: controller, updates: updates, uiState: uiState, windowMode: windowMode)
+                MainThreadWatchdog.shared.start()   // PERF-07(#2549):主執行緒卡頓偵測,只量不改行為;perf stalls 讀數
                 #endif
             }
             #if !MYPARROT_MAS
@@ -237,7 +238,7 @@ struct AppCommands: Commands {
                 .keyboardShortcut(",", modifiers: .command)
         }
         CommandMenu(L("錄音")) {
-            Button(L("開始錄音")) { RecordingConsent.confirmThen { controller.startRecording() } }   // MAS-17
+            Button(L("開始錄音")) { RecordingGate.confirmThen(controller) { controller.startRecording() } }   // MAS-17＋PERM-03
                 .keyboardShortcut("r", modifiers: .command)
                 // #949:CLI 在錄(別的進程持有租約)⇒ 停用(按了也只會拿到「已有錄音進行中」)。
                 .disabled(!(controller.state == .idle || controller.state == .finished) || uiState.showSettings
@@ -255,7 +256,7 @@ struct AppCommands: Commands {
                 .keyboardShortcut("e", modifiers: .command)
                 .disabled(!(controller.state == .recording || controller.state == .paused))
             // #2438 I1:標記 ⌘⇧M(⌘M 是系統「縮到 Dock」)。
-            Button(L("標記")) { uiState.addMarker(at: controller.elapsed) }
+            Button(L("標記")) { uiState.addMarker(at: controller.elapsedExact) }
                 .keyboardShortcut("m", modifiers: [.command, .shift])
                 .disabled(!(controller.state == .recording || controller.state == .paused))
             Divider()
@@ -406,6 +407,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         AppleFMAvailability.shared.refresh()
         // MAS-07:回前景重探書籤(資料夾在背景被搬走／刪掉／權限撤回 ⇒ 按錄音前就提示)。GitHub 版 no-op。
         if let c = controller {
+            c.refreshPermissionStatus()   // PERM-01(#2673):使用者可能剛去系統設定開麥克風回來 ⇒ 橫幅不必重開 app 就更新
             c.revalidateRecordingsFolder()
             if c.needsRecordingsFolder, uiState?.showSettings != true { uiState?.showFolderPrompt = true }
         }

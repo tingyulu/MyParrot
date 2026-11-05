@@ -8,7 +8,9 @@ enum NotesViewMode: String, CaseIterable { case edit, preview }
 struct NotesEditorPane: View {
     let store: NotesStore
     let proxy: NotesEditorProxy
-    /// 錄音經過秒數；nil＝現在不能標記。
+    /// 現在能不能標記（錄音中／暫停中）；PERF-04：狀態值，不是每 0.25 s 變的時鐘。
+    var canMark: Bool = false
+    /// 錄音經過秒數；只在按下標記時讀。nil＝現在不能標記。
     var markerElapsed: () -> TimeInterval?
     /// 標題列的鎖定提示（錄音中筆記鎖在進行中那場：「🔒 錄音中」；待錄音：「草稿」）。
     var contextLabel: String? = nil
@@ -33,7 +35,7 @@ struct NotesEditorPane: View {
                 status
             }
             if mode == .edit {
-                MarkdownToolbar(proxy: proxy, markerElapsed: markerElapsed)
+                MarkdownToolbar(proxy: proxy, canMark: canMark, markerElapsed: markerElapsed)
                 NotesTextView(text: Binding(get: { store.text }, set: { store.setText($0) }), proxy: proxy)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
             } else {

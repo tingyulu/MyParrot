@@ -94,6 +94,9 @@ public enum RecordingWarning: Sendable, Equatable {
     case micBluetoothUnstable(device: String)
     case micSilent
     case sysSilent
+    /// PERM-05(#2673):輸出裝置**不是**藍牙時的對方軌無聲警告——HFP 說法不成立,先請確認會議聲音在這台 Mac 播放,
+    /// 再提「可能是系統音訊錄製權限沒開」(沒有公開 API 查那個權限,只能推論);重建後仍無聲也用這一句。
+    case sysSilentCheckPermission
     case deviceChanged
 
     /// 繁中模板(`%@`=參數位置),同時是翻譯表的 key。
@@ -124,6 +127,8 @@ public enum RecordingWarning: Sendable, Equatable {
             return "你的麥克風似乎沒收到聲音 — 請到設定確認「你的麥克風」選對裝置"
         case .sysSilent:
             return "⚠️ 對方(系統音訊)沒收到聲音 — 若用藍牙耳機當輸出,通話會走 HFP/電話模式而擷取不到對方,請改用內建喇叭或有線輸出;並確認會議音訊在這台 Mac 上播放"
+        case .sysSilentCheckPermission:
+            return "⚠️ 對方(系統音訊)沒收到聲音 — 請確認會議音訊在這台 Mac 上播放;若已在播放,可能是「系統音訊錄製」權限沒開,請到系統設定允許 MyParrot"
         case .deviceChanged:
             return "偵測到音訊裝置變更,錄音續行中,請確認狀態"
         // l10n-keys:end
@@ -144,7 +149,7 @@ public enum RecordingWarning: Sendable, Equatable {
             return [.localizable(reason.template)]
         case .engineChangeDeferred, .whisperModelMissing, .cloudNotConfigured,
              .sysRebuildMaybeStillSilent, .micSilentBluetooth, .micSilent,
-             .sysSilent, .deviceChanged:
+             .sysSilent, .sysSilentCheckPermission, .deviceChanged:
             return []
         }
     }
@@ -158,10 +163,28 @@ public enum RecordingWarning: Sendable, Equatable {
     /// (麥克風、裝置變更、引擎…)與對方軌有沒有聲音無關,不能被收掉。
     public var clearsWhenSysSignalReturns: Bool {
         switch self {
-        case .sysSilent, .sysRebuildMaybeStillSilent: return true
+        case .sysSilent, .sysRebuildMaybeStillSilent, .sysSilentCheckPermission: return true
         case .engineChangeDeferred, .whisperModelMissing, .cloudNotConfigured,
              .micSwitched, .micSwitchFailed, .micReconnected, .sysRestarted,
              .micSilentBluetooth, .micBluetoothUnstable, .micSilent, .deviceChanged: return false
         }
     }
+
+    /// PERM(#2673):橫幅上要不要多一顆可行動的鈕(GUI 畫鈕;CLI／state.json 照舊只有 `zhTW` 整句)。
+    public var action: WarningAction? {
+        switch self {
+        case .sysSilentCheckPermission:
+            return .openSystemSettings(pane: PermissionKind.systemAudio.settingsPane)
+        case .engineChangeDeferred, .whisperModelMissing, .cloudNotConfigured,
+             .micSwitched, .micSwitchFailed, .micReconnected, .sysRebuildMaybeStillSilent, .sysRestarted,
+             .micSilentBluetooth, .micBluetoothUnstable, .micSilent, .sysSilent, .deviceChanged:
+            return nil
+        }
+    }
+}
+
+/// 警示橫幅上的可行動鈕。
+public enum WarningAction: Sendable, Equatable {
+    /// 帶人去「系統設定 → 隱私權與安全性」的某個分頁(`x-apple.systempreferences:` 後那段)。
+    case openSystemSettings(pane: String)
 }

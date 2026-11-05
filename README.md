@@ -17,6 +17,14 @@
 <img src="docs/img/main-window-dark.png" width="560" alt="Main window (dark) — obsidian controller">
 </p>
 
+## What's new in 0.5.4
+
+- **Fixed: typing notes while recording stuttered** — six always-on animations (controller pulse, breathing LED, mascot) plus a 4 Hz clock and ~24 Hz level meters made SwiftUI re-lay out the whole window on every frame of a ProMotion display, eating 40–70% of the main thread while Whisper large-v3 was transcribing live. The decorations now share one 10 Hz timer, level meters coalesce to 100 ms, the clock publishes once a second, the notes toolbar no longer follows the clock, state-file writes and folder scans moved off the main thread, and syntax colouring is debounced and skipped while an input method is composing. Debug build: recording CPU 30–52% → 18–27%, main-thread layout passes down 89%.
+- **Fixed: live transcript lines from the previous recording leaking into the next**, and the Apple engine's live `.srt` having all-zero timestamps.
+- **Fixed: the last sentences finalised after you press Stop were dropped** — they are now written back into the same recording's `.txt` / `.srt` (both files or neither).
+- **Permission guidance when access was denied** — if Microphone or Speech Recognition was refused earlier, the banner now opens System Settings at the right pane and says what will be missing, instead of a button that did nothing; a silent remote track distinguishes Bluetooth call mode from a missing System Audio permission; Settings lists the three permissions with shortcuts; the CLI prints a one-line hint.
+- Known issues unchanged from 0.5.3: Apple Translate is system-Translate quality; a Bluetooth headset reconnecting while you record on the built-in mic may still drop ~8 s; Codex carries a fixed 13.5k-token base per batch.
+
 ## What's new in 0.5.3
 
 - **Fixed: the `large-v3-q5_0` Whisper model could never be installed** — the size check compared decimal-MB constants against MiB, and the q5_0 constant itself was wrong, so every download ended in “size mismatch”. Sizes are now pinned to the upstream byte counts (q5_0 is 1.1 GB, not 2.3). Thanks to noub99 for the report (#1).

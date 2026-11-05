@@ -6,7 +6,9 @@ import MyParrotCore
 /// 每顆都呼叫 `MarkdownEditing` 的同一組純函式（選單 ⌘B／⌘I／⌘K／⌘⇧L 也走同一組）。
 struct MarkdownToolbar: View {
     let proxy: NotesEditorProxy
-    /// 錄音經過秒數；nil＝現在不能標記（不在錄音／暫停）。
+    /// 現在能不能標記（錄音中／暫停中）。PERF-04：只看狀態，不在 body 讀 elapsed，筆記欄才不會跟著時鐘每 0.25 s 重建。
+    var canMark: Bool
+    /// 錄音經過秒數；只在按下標記時讀。nil＝現在不能標記。
     var markerElapsed: () -> TimeInterval?
     @State private var loc = Localizer.shared
 
@@ -34,8 +36,8 @@ struct MarkdownToolbar: View {
                 chip(Text("—"), help: L("分隔線")) { apply { MarkdownEditing.insertHR($0, selection: $1) } }
                 sep
                 chip(Image(systemName: "flag.fill"), badge: "⌘⇧M", help: L("標記"), tint: MP.blue) { insertMarker() }
-                    .disabled(markerElapsed() == nil)
-                    .opacity(markerElapsed() == nil ? 0.4 : 1)
+                    .disabled(!canMark)
+                    .opacity(canMark ? 1 : 0.4)
             }
             .padding(.vertical, 2)
         }

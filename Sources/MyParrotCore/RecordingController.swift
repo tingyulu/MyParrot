@@ -38,6 +38,22 @@ public final class RecordingController {
     // Settings
     public var micPermission = false
     public var speechPermission = false
+    /// PERM-01(#2673):四態權限狀態(`refreshPermissionStatus()` 讀;啟動、請求後、回前景都刷)。`micPermission`／`speechPermission`
+    /// 布林保留＝`== .authorized`(CLI、state.json 不動)。讀狀態不會觸發詢問框。
+    public private(set) var micAuthorization: PermissionState = .notDetermined
+    public private(set) var speechAuthorization: PermissionState = .notDetermined
+    #if DEBUG
+    /// PERM-11:DEBUG 控制通道蓋掉讀到的狀態(只蓋 Core 看到的值、不碰 TCC),讓 GUI 的拒絕路徑不靠真拒權限就能驗。
+    public var debugPermissionOverride: (mic: PermissionState?, speech: PermissionState?) = (nil, nil) {
+        didSet { refreshPermissionStatus() }
+    }
+    #endif
+    /// PERM-02:錄音前該掛的權限橫幅(GUI 依介面語言組字)。語音辨識只在即時引擎真的需要那個 TCC 時才評估。
+    public var permissionHints: [PermissionHint] {
+        PermissionHints.decide(mic: micAuthorization, speech: speechAuthorization, speechNeeded: liveEngineNeedsSpeechAuthorization)
+    }
+    /// macOS 26 的 SpeechAnalyzer 不走語音辨識 TCC;只有 SFSpeech 備援引擎(`LiveTranscriber`)才需要。
+    public var liveEngineNeedsSpeechAuthorization: Bool { live is LiveTranscriber }
     public var inputGain: Float = 1.0 { didSet { mic.gain = inputGain; monitor.gain = inputGain; defaults.set(inputGain, forKey: "inputGain") } }
     /// Software echo cleanup (offline, post-recording). Cancels 對方 speaker echo
     /// bled into 你 when recording on speakers. Pure DSP — does NOT touch macOS
@@ -150,6 +166,17 @@ public final class RecordingController {
     var externalWatcher: ExternalRecordingWatcher?
     /// 錄音資料夾頂層檔名快照(監看事件/保底輪詢時比對,有變才重掃列表)。
     var recordingsDirSignature: [String] = []
+    /// PERF-05 二審:外部監看快照的序號(發出／已套用),慢的舊掃描晚到不倒退。
+    @ObservationIgnored var externalSeq = 0
+    @ObservationIgnored var externalAppliedSeq = 0
+    /// PERF-03 二審:電平批次的世代——開錄／停錄各加一,舊場排在 main 上還沒跑的批次不會套進新場。
+    @ObservationIgnored var levelGeneration = 0
+    /// PERF-03:兩聲道電平 100 ms 合併(音訊執行緒餵、窗滿才 hop 到 main)。`nonisolated let`:音訊回呼直接碰它,不經 MainActor。
+    nonisolated let levelCoalescer = OSAllocatedUnfairLock(initialState: LevelCoalescer(window: 0.1))
+    /// PERF-03:圓盤電平環讀的快照(含峰值保持)。不是 @Observable:遙控器的 10 Hz 時鐘 tick 時 `peekMeter()`,
+    /// 電平更新本身不再讓 SwiftUI 多跑 pass(`otherLevel`／`youLevel` 仍照批次更新,給迷你模式與 DebugControl)。
+    nonisolated let meter = OSAllocatedUnfairLock(initialState: MeterSnapshot())
+    public nonisolated func peekMeter() -> MeterSnapshot { meter.withLock { $0 } }
     var accumulatedElapsed: TimeInterval { accumulated }
     var segmentStart: Date { startDate }
     private var deviceListenerInstalled = false
@@ -546,6 +573,33 @@ public final class RecordingController {
         let speechOK = await Self.requestSpeechAuthorization()
         micPermission = micOK
         speechPermission = speechOK
+        refreshPermissionStatus()
+    }
+
+    /// PERM-02(二審):橫幅上的「授權」只請求**自己那個**權限——`requestPermissions()` 會一次請麥克風＋語音辨識,
+    /// 按麥克風的鈕不該連帶跳語音辨識的框(尤其 `speechNeeded == false` 時)。系統音訊沒有可請求的 API ⇒ 只刷狀態。
+    public func requestPermission(_ kind: PermissionKind) async {
+        switch kind {
+        case .microphone: micPermission = await AVCaptureDevice.requestAccess(for: .audio)
+        case .speech:     speechPermission = await Self.requestSpeechAuthorization()
+        case .systemAudio: break
+        }
+        refreshPermissionStatus()
+    }
+
+    /// PERM-01:讀麥克風／語音辨識的四態授權狀態(被動讀取,不跳框)。GUI 在啟動、`requestPermissions()` 後、
+    /// app 回前景(使用者從系統設定切回來)各呼叫一次;按錄音的 gate 也先刷一次。
+    public func refreshPermissionStatus() {
+        var mic = PermissionState(AVCaptureDevice.authorizationStatus(for: .audio))
+        var speech = PermissionState(SFSpeechRecognizer.authorizationStatus())
+        #if DEBUG
+        if let m = debugPermissionOverride.mic { mic = m }
+        if let sp = debugPermissionOverride.speech { speech = sp }
+        #endif
+        micAuthorization = mic
+        speechAuthorization = speech
+        micPermission = mic == .authorized
+        speechPermission = speech == .authorized
     }
 
     // nonisolated: SFSpeech calls back on a background queue, so the continuation
@@ -971,7 +1025,8 @@ public final class RecordingController {
         // 橫幅——否則 20 秒的重建會先跳出來,60 秒的再跳門檻等於白設。
         if let banner = SysTrackWatchdog.rebuildBanner(
                 silentWarned: silentSysWarned, reason: reason,
-                inRewarnGrace: sysWarningAutoDismissed && !silentSysWarned) {
+                inRewarnGrace: sysWarningAutoDismissed && !silentSysWarned,
+                outputTransport: system.outputTransport) {
             warning = banner
         }
     }
@@ -1309,40 +1364,23 @@ public final class RecordingController {
         let recorder = self.recorder
         let live = self.live
         let liveOn = self.liveTranscribeEnabled
-        system.onLevel = { [weak self] v in Task { @MainActor in
-            guard let self else { return }
-            self.otherLevel = v; self.sysPeak = max(self.sysPeak, v)
-            if self.sysSpeech.observe(level: v, at: self.elapsed) { self.speechSinceTick = true }   // CAL-09
-            // A buffer arrived → the *tap* is alive. But under Bluetooth HFP routing the
-            // tap keeps delivering all-zero buffers, so buffer-arrival alone does NOT mean
-            // 對方 audio is being captured (BUG-24). Track buffer-flow for the "device
-            // removed → buffers stop" watchdog, but track actual SIGNAL separately.
-            self.lastSysLevelAt = Date()
-            if v >= Self.silenceThreshold {
-                self.lastSysSignalAt = Date()
-                self.lastSysRealSignalAt = Date()   // BUG-28:重建不會重設這個,才算得準「真的安靜多久」
-                self.sysAutoRebuildCount = 0   // reset the cap on real signal, not on silent buffers
-                self.silentSysWarned = false   // re-arm: if it dies again later, warn again
-                // BUG-28/B2(Eric 2026-09-17):對方軌恢復真訊號 → 自動收起「沒收到聲音」
-                // 類的橫幅(其他警示與對方軌無關,不動)。收起過一次就進再跳觀察期。
-                if self.warning?.clearsWhenSysSignalReturns == true {
-                    self.warning = nil
-                    self.sysWarningAutoDismissed = true
-                }
-            } } }
-        mic.onLevel = { [weak self] v in Task { @MainActor in
-            guard let self else { return }
-            self.youLevel = v; self.micPeak = max(self.micPeak, v)
-            if self.micSpeech.observe(level: v, at: self.elapsed) { self.speechSinceTick = true }   // CAL-09
-            // Buffers are flowing → the tap is alive. Mark liveness. AUD-38:連續重建計數只在 buffer
-            // **連續**流動 ≥10 秒才歸零(不再每個 buffer 就歸零,否則「建起來流 1 秒又死」永遠碰不到上限);
-            // 跟上一個 buffer 隔超過「判死」門檻＝流動中斷過,連續流動從這個 buffer 重新起算。
-            let now = Date()
-            if self.micFlowSince == nil || now.timeIntervalSince(self.lastMicLevelAt) > MicWatchdogPolicy.deadAfter {
-                self.micFlowSince = now
-            }
-            self.lastMicLevelAt = now
-            if MicWatchdogPolicy.shouldResetCount(flowSince: self.micFlowSince, now: now) { self.micAutoRebuildCount = 0 } } }
+        // PERF-03(Z 節):兩聲道的 buffer 回呼(各自的音訊執行緒)先在鎖裡合併成 100 ms 一批(各聲道取窗內最大值＋最後一筆時間),
+        // 窗滿才 hop 一次到 main 套用——原本每個 buffer(約 24 次／秒)各開一個 Task 改 @Observable 屬性,電平環跟著重畫。
+        // 看門狗吃的是「最後一筆 buffer 的時間」與「窗內峰值」,門檻都是秒級,批到 100 ms 不改變判定。
+        let coalescer = self.levelCoalescer
+        coalescer.withLock { _ = $0.flush() }
+        meter.withLock { $0.reset() }
+        levelGeneration += 1
+        let levelGen = levelGeneration
+        // 二審第二輪:時間在鎖內取,兩條音訊執行緒交錯時窗的起點與 lastAt 不會拿到比前一筆更早的時間。
+        system.onLevel = { [weak self] v in
+            guard let batch = coalescer.withLock({ $0.feed(.other, level: v, now: Date()) }) else { return }
+            Task { @MainActor in self?.applyLevels(batch, generation: levelGen) }
+        }
+        mic.onLevel = { [weak self] v in
+            guard let batch = coalescer.withLock({ $0.feed(.you, level: v, now: Date()) }) else { return }
+            Task { @MainActor in self?.applyLevels(batch, generation: levelGen) }
+        }
         // Gate the live transcriber on the recorder's pause flag too, so pausing
         // also stops transcribing (otherwise paused speech is still transcribed
         // and the transcript timeline drifts from the saved audio).
@@ -1422,7 +1460,7 @@ public final class RecordingController {
         startTicker()
         markerCount = 0
         startOwnerTimer()          // #949:租約心跳＋GUI owner 寫 state.json(錄音＋暫停期間都跑)
-        writeOwnerState()
+        writeOwnerState(sync: true)   // PERF-05:狀態切換當下同步寫(0.5 s 的 tick 才走背景)
     }
 
     public func pause() {
@@ -1432,7 +1470,7 @@ public final class RecordingController {
         recorder.isPaused = true
         state = .paused
         stopTicker()
-        writeOwnerState()          // #949:狀態變化當下就寫,不等 0.5 秒
+        writeOwnerState(sync: true)   // #949:狀態變化當下就寫,不等 0.5 秒
     }
 
     public func resume() {
@@ -1441,7 +1479,7 @@ public final class RecordingController {
         recorder.isPaused = false
         state = .recording
         startTicker()
-        writeOwnerState()
+        writeOwnerState(sync: true)
     }
 
     public func stop() {
@@ -1455,9 +1493,13 @@ public final class RecordingController {
         micSwapGeneration += 1; isSwitchingMic = false; micFlowSince = nil
         inflightMics.forEach { $0.stop() }; inflightMics.removeAll()   // AUD-38 F5
         mic.stop()
-        live.stop()
+        // TR-31(#2676):`live.stop(completion:)` 移到發布之後——completion 要抓到這筆 rec 與停止當下寫出的檔案內容。
+        // 餵音已隨 mic/system 停了,引擎晚幾毫秒收尾沒有差別。
         recorder.stop()
         otherLevel = 0; youLevel = 0
+        levelGeneration += 1                          // PERF-03 二審:已排在 main 上的舊批次世代不符 ⇒ 不會套進下一場
+        levelCoalescer.withLock { _ = $0.flush() }   // PERF-03:丟掉窗內剩的,免得停錄後一批晚到把 0 蓋回去(applyLevels 也依 state 擋)
+        meter.withLock { $0.reset() }                 // 停錄:電平環與峰值歸零(原 DialView onChange(state) 的事)
 
         // #949 REC-31:recorder 已 finalize ⇒ inprogress 原子發布到頂層 → 刪 inprogress 目錄 → 釋放租約。
         // 發布失敗:租約照放、檔案留在 inprogress 給收割規則復原(lastError 已設),這裡不建列表項。
@@ -1475,12 +1517,19 @@ public final class RecordingController {
             lastStoppedRecordingID = rec.id
             // #2483 C(TRX-01):停止當下先把即時稿落檔,不管後面重不重轉、重轉成不成功,永遠有一份稿。
             let finalLines = liveTranscript.filter(\.isFinal)
+            var writtenAtStop: (txt: String, srt: String)? = nil
             if !finalLines.isEmpty {
-                writeTranscriptSidecar(finalLines, for: rec)
-                recordings[0].hasTranscript = true
-                liveSidecarStems.insert(SidecarSet.stem(of: rec.url))   // 發布後的頂層路徑(#949 inprogress 之後 url 是暫存)
-                transcriptSource = rec
+                if let written = writeTranscriptSidecar(finalLines, for: rec) {
+                    // 二審(TR-31):兩份都寫成功才標「有逐字稿」;寫失敗已留 error log,磁碟維持寫入前。
+                    writtenAtStop = written
+                    recordings[0].hasTranscript = true
+                    liveSidecarStems.insert(SidecarSet.stem(of: rec.url))   // 發布後的頂層路徑(#949 inprogress 之後 url 是暫存)
+                    transcriptSource = rec
+                } else {
+                    lastError = "即時逐字稿落檔失敗(見系統 log),錄音本身已存"   // 二審第三輪:停止當下寫失敗也要讓人看到
+                }
             }
+            lateLiveFlush = (rec.id, finalLines.count, writtenAtStop)
             convertToM4A(rec, autoTranscribe: transcribePolicy == .immediately)
             // #2483 E(TRX-07):閒置時才重轉 ⇒ 先進待轉清單,列表標「待高精度重轉」,每 30 秒看一次條件。
             if transcribePolicy == .whenIdle, engine == .whisperKit {
@@ -1490,6 +1539,61 @@ public final class RecordingController {
         }
         state = .finished
         scheduleWhisperUnload()   // TR-27:停止錄音後開始計閒置
+        // TR-31(#2676):停止後句界才定稿的行(Apple 一句話接著靜音到停止、Whisper 尾塊)由引擎收進剛關的那一段,
+        // 兩聲道收完或超時 15 秒在 main 回呼一次;這裡不等、不卡停止鈕。發布失敗(沒有 rec)⇒ 只收尾不補寫。
+        if let ctx = lateLiveFlush {
+            lateLiveFlush = nil
+            // 收尾期間引擎物件要活著:停止後幾秒內若換引擎／模型下載完成觸發 rebuildTranscribers(),`live` 被換掉,
+            // 舊物件連同還在飛的尾塊一起消失、completion 就永遠不來。閉包抓住它,收尾回呼後才放。
+            let engine = live
+            engine.stop { [weak self] late in
+                withExtendedLifetime(engine) {
+                    self?.flushLateLiveLines(late, recordingID: ctx.id, countAtStop: ctx.countAtStop, writtenAtStop: ctx.written)
+                }
+            }
+        } else {
+            live.stop()
+        }
+    }
+
+    /// TR-31:停止當下留給 `live.stop(completion:)` 的上下文——這筆 rec、停止時已落檔的定稿行數、寫出的 `.txt`／`.srt` 內容。
+    private var lateLiveFlush: (id: UUID, countAtStop: Int, written: (txt: String, srt: String)?)?
+
+    /// TR-31(#2676):把停止後才定稿的行補寫回那一段的 `.txt`／`.srt`。
+    /// 只在**檔案還是停止當下寫的那份**才動(逐字比對;停止時沒寫 ⇒ 現在也必須不存在)——被重轉、校正、使用者改過就不碰、留 log。
+    /// 用 rec.id 找現在的 URL(改名、caf→m4a 都跟得上);沒開新錄音(仍 `.finished` 且 `lastStoppedRecordingID` 是它)才同步畫面。
+    private func flushLateLiveLines(_ late: [TranscriptLine], recordingID: UUID, countAtStop: Int,
+                                    writtenAtStop: (txt: String, srt: String)?) {
+        let finals = late.filter(\.isFinal)
+        let volatile = late.count - finals.count
+        let idx = recordings.firstIndex(where: { $0.id == recordingID })
+        var txtNow = LateLiveFlush.SidecarRead.missing, srtNow = LateLiveFlush.SidecarRead.missing
+        if let idx {
+            let base = recordings[idx].url.deletingPathExtension()
+            txtNow = LateLiveFlush.read(base.appendingPathExtension("txt"))
+            srtNow = LateLiveFlush.read(base.appendingPathExtension("srt"))
+        }
+        let decision = LateLiveFlush.decide(finalsAfter: finals.count, finalsAtStop: countAtStop, writtenAtStop: writtenAtStop,
+                                            txtOnDisk: txtNow, srtOnDisk: srtNow, recordingListed: idx != nil)
+        guard case .write = decision, let idx else {
+            if case .skip(let why) = decision {
+                os_log("MyParrot live: 停止後收尾 %d 行定稿(停止時 %d,暫定 %d),跳過補寫:%{public}@", finals.count, countAtStop, volatile, why)
+            }
+            return
+        }
+        let rec = recordings[idx]
+        // 二審:寫失敗(唯讀、磁碟滿、書籤失效)不得標成功;writeTranscriptSidecar 已留 error log 並還原成寫入前;畫面也要看得到。
+        guard writeTranscriptSidecar(finals, for: rec) != nil else {
+            lastError = "停止後 \(finals.count - countAtStop) 行定稿補寫失敗(見系統 log),請重轉這一筆"
+            return
+        }
+        recordings[idx].hasTranscript = true
+        liveSidecarStems.insert(SidecarSet.stem(of: rec.url))   // 之後重轉照 TRX-02 另存 .live.srt
+        if state == .finished, lastStoppedRecordingID == recordingID {
+            liveTranscript = finals
+            transcriptSource = recordings[idx]
+        }
+        os_log("MyParrot live: 停止後補寫 %d 行定稿到 %{private}@(停止時 %d 行,暫定丟 %d)", finals.count - countAtStop, rec.title, countAtStop, volatile)
     }
 
     /// After stopping, convert the lossless CAF into a compact .m4a and drop the CAF.
@@ -1772,9 +1876,12 @@ public final class RecordingController {
                 transcriptVersion += 1
                 transcriptSource = rec            // #2417:校正層要知道這份稿屬於哪筆
                 correctionSuggestions = []
-                if let idx = recordings.firstIndex(of: rec) { recordings[idx].hasTranscript = true }
-                writeTranscriptSidecar(lines, for: rec)
-                clearInterrupted(rec.url)       // #1697:轉完了,「上次未完成」標記清掉
+                if writeTranscriptSidecar(lines, for: rec) != nil {
+                    if let idx = recordings.firstIndex(of: rec) { recordings[idx].hasTranscript = true }
+                    clearInterrupted(rec.url)       // #1697:轉完了,「上次未完成」標記清掉(二審 TR-31:寫失敗就留著,下次還能重試)
+                } else {
+                    lastError = "逐字稿檔寫入失敗(見系統 log)"   // 二審 TR-31:寫失敗不再安靜
+                }
             } catch {
                 lastError = "轉逐字稿失敗:\(error)"
             }
@@ -1795,12 +1902,64 @@ public final class RecordingController {
 
     // MARK: - Internals
 
+    /// 精確的經過秒數(業務邏輯用:標記、語音區段、看門狗);`elapsed` 是整秒才發布的顯示值(PERF-03)。
+    public var elapsedExact: TimeInterval {
+        state == .recording ? accumulated + Date().timeIntervalSince(startDate) : accumulated
+    }
+
+    /// PERF-03:套用一批(≤100 ms)電平——沒餵到的聲道是 nil、不動它。停錄／換場後晚到的批次不套(世代不符或 state 不對 ⇒ 丟)。
+    func applyLevels(_ batch: LevelCoalescer.Batch, generation: Int) {
+        guard generation == levelGeneration, state == .recording || state == .paused else { return }
+        let at = elapsedExact
+        meter.withLock { $0.update(other: batch.other?.peak, you: batch.you?.peak, now: Date()) }
+        if let o = batch.other {
+            otherLevel = o.peak; sysPeak = max(sysPeak, o.peak)
+            if sysSpeech.observe(level: o.peak, at: at) { speechSinceTick = true }   // CAL-09
+            // A buffer arrived → the *tap* is alive. But under Bluetooth HFP routing the
+            // tap keeps delivering all-zero buffers, so buffer-arrival alone does NOT mean
+            // 對方 audio is being captured (BUG-24). Track buffer-flow for the "device
+            // removed → buffers stop" watchdog, but track actual SIGNAL separately.
+            lastSysLevelAt = o.lastAt
+            if o.peak >= Self.silenceThreshold {
+                lastSysSignalAt = o.lastAt
+                lastSysRealSignalAt = o.lastAt   // BUG-28:重建不會重設這個,才算得準「真的安靜多久」
+                sysAutoRebuildCount = 0   // reset the cap on real signal, not on silent buffers
+                silentSysWarned = false   // re-arm: if it dies again later, warn again
+                // BUG-28/B2(Eric 2026-09-17):對方軌恢復真訊號 → 自動收起「沒收到聲音」
+                // 類的橫幅(其他警示與對方軌無關,不動)。收起過一次就進再跳觀察期。
+                if warning?.clearsWhenSysSignalReturns == true {
+                    warning = nil
+                    sysWarningAutoDismissed = true
+                }
+            }
+        }
+        if let y = batch.you {
+            youLevel = y.peak; micPeak = max(micPeak, y.peak)
+            if micSpeech.observe(level: y.peak, at: at) { speechSinceTick = true }   // CAL-09
+            // Buffers are flowing → the tap is alive. Mark liveness. AUD-38:連續重建計數只在 buffer
+            // **連續**流動 ≥10 秒才歸零(不再每個 buffer 就歸零,否則「建起來流 1 秒又死」永遠碰不到上限);
+            // 跟上一個 buffer 隔超過「判死」門檻＝流動中斷過,連續流動從這個 buffer 重新起算。
+            let now = y.lastAt
+            if micFlowSince == nil || now.timeIntervalSince(lastMicLevelAt) > MicWatchdogPolicy.deadAfter {
+                micFlowSince = now
+            }
+            lastMicLevelAt = now
+            if MicWatchdogPolicy.shouldResetCount(flowSince: micFlowSince, now: now) { micAutoRebuildCount = 0 }
+        }
+    }
+
     private func startTicker() {
         ticker?.invalidate()
         ticker = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.state == .recording else { return }
-                self.elapsed = self.accumulated + Date().timeIntervalSince(self.startDate)
+                // PERF-03:顯示到秒,整秒沒變就不發布(每次發布都讓圓盤計時與觀察它的 view 重算);看門狗照 0.25 s 跑。
+                let next = self.accumulated + Date().timeIntervalSince(self.startDate)
+                if ElapsedDisplay.shouldPublish(prev: self.elapsed, next: next) { self.elapsed = next }
+                // PERF-03 二審:buffer 停了(裝置死掉)最後一窗沒下一筆來觸發 ⇒ 這裡每 0.25 s 把開超過 0.2 s 的窗交出,看門狗時間戳不卡在前一窗。
+                if let stale = self.levelCoalescer.withLock({ $0.flushIfStale(now: Date(), olderThan: 0.2) }) {
+                    self.applyLevels(stale, generation: self.levelGeneration)
+                }
                 // AUD-28 / BUG-18 liveness watchdog: buffers stopped flowing (mic.onLevel
                 // went stale) → the engine/route died and AVAudioEngine didn't recover.
                 // Auto-rebuild on the current device (capped consecutive attempts, each on
@@ -1838,11 +1997,15 @@ public final class RecordingController {
                 // After 8s, if your mic still hasn't picked up anything, warn — your
                 // voice channel is dead (usually the wrong input device is selected).
                 // AUD-38:切換中不判;切換成功後再給 8 秒緩衝(micSilenceGraceUntil)。
-                if self.elapsed > 8, self.micPeak < Self.silenceThreshold, !self.silentMicWarned,
+                // PERM-04(#2673):麥克風權限被拒／受限時不跳(錄音前橫幅已講清楚後果,再怪「選對裝置」是誤歸因)。
+                if next > 8, self.micPeak < Self.silenceThreshold, !self.silentMicWarned,
                    !self.isSwitchingMic, now >= self.micSilenceGraceUntil {
-                    self.silentMicWarned = true
-                    self.warning = self.selectedInputDevice?.isBluetooth == true
-                        ? .micSilentBluetooth : .micSilent
+                    // 二審:只有真的跳了才 latch——被拒時不 latch,使用者錄音中去開權限回來、麥克風仍因選錯裝置無聲時還會警告。
+                    if let w = PermissionHints.micSilentWarning(auth: self.micAuthorization,
+                                                                isBluetooth: self.selectedInputDevice?.isBluetooth == true) {
+                        self.silentMicWarned = true
+                        self.warning = w
+                    }
                 }
                 // 對方軌死聲道警告。BUG-24 前這裡用整場單調的 `sysPeak`,開頭只要有
                 // 一瞬間收到聲就永久壓過門檻、「中途才死」偵測不到(BUG-24 實例:開頭 1 分鐘
@@ -1857,24 +2020,25 @@ public final class RecordingController {
                     realSilentFor: now.timeIntervalSince(self.lastSysRealSignalAt),
                     warnAfter: Self.sysSilentWarnAfter, rewarnAfter: Self.sysSilentRewarnAfter)
                 if SysTrackWatchdog.shouldWarnSilent(
-                        elapsed: self.elapsed, silentFor: silentInputs.silentFor,
+                        elapsed: next, silentFor: silentInputs.silentFor,
                         alreadyWarned: self.silentSysWarned, warnAfter: silentInputs.warnAfter) {
                     self.silentSysWarned = true
-                    self.warning = .sysSilent
+                    // PERM-05(#2673):輸出是藍牙 ⇒ HFP 說法(不變);非藍牙 ⇒ 請確認播放／可能是系統音訊錄製權限＋開啟系統設定。
+                    self.warning = SysTrackWatchdog.silentBanner(outputTransport: self.system.outputTransport)
                 }
                 // CAL-08(G1):起錄 3 分鐘內某軌從頭到尾無訊號 → 通知(每軌一次)。「從頭到尾」＝該軌開錄以來的最大值仍在死軌門檻下。
-                if DeadTrackRule.shouldAlarm(elapsed: self.elapsed, everHadSignal: self.micPeak > Self.silenceThreshold,
+                if DeadTrackRule.shouldAlarm(elapsed: next, everHadSignal: self.micPeak > Self.silenceThreshold,
                                              alreadyAlarmed: self.micDeadAlarmed, after: self.deadTrackAlarmAfter) {
                     self.micDeadAlarmed = true; self.deadTrackAlarms.append(.mic); self.onDeadTrackAlarm?(.mic)
                 }
-                if DeadTrackRule.shouldAlarm(elapsed: self.elapsed, everHadSignal: self.sysPeak > Self.silenceThreshold,
+                if DeadTrackRule.shouldAlarm(elapsed: next, everHadSignal: self.sysPeak > Self.silenceThreshold,
                                              alreadyAlarmed: self.sysDeadAlarmed, after: self.deadTrackAlarmAfter) {
                     self.sysDeadAlarmed = true; self.deadTrackAlarms.append(.system); self.onDeadTrackAlarm?(.system)
                 }
                 // CAL-11(C2):兩軌連續 30 分鐘沒人說話 → 建議停(只提醒;再有人說話會重新武裝)。暫停時 ticker 不跑、elapsed 不走,自然不計。
                 let spoke = self.speechSinceTick
                 self.speechSinceTick = false
-                if self.silenceRule.observe(anySpeech: spoke, at: self.elapsed) {
+                if self.silenceRule.observe(anySpeech: spoke, at: next) {
                     self.silenceStopSuggestedAt = Date()
                     self.onSilenceStopSuggested?()
                 }
@@ -1995,12 +2159,11 @@ public final class RecordingController {
                                                convertingStems: converting)
     }
 
-    func writeTranscriptSidecar(_ lines: [TranscriptLine], for rec: Recording) {
-        let base = rec.url.deletingPathExtension()
-        let body = lines.map { "\($0.isYou ? "你" : "對方"): \($0.text)" }.joined(separator: "\n")
-        try? body.write(to: base.appendingPathExtension("txt"), atomically: true, encoding: .utf8)
-        // Timed SRT alongside the plain text (TR-12).
-        try? SRT.make(from: lines).write(to: base.appendingPathExtension("srt"), atomically: true, encoding: .utf8)
+    /// 回寫出的兩份內容(TR-31 用來判斷「檔案還是不是停止當下那份」);**任一份寫失敗 ⇒ 回 nil**、兩份維持寫入前的樣子
+    /// (成對交易在 `TranscriptSidecarWriter`,SelfTest 覆蓋),呼叫端不得標「有逐字稿」(二審 TR-31)。Timed SRT alongside the plain text (TR-12).
+    @discardableResult
+    func writeTranscriptSidecar(_ lines: [TranscriptLine], for rec: Recording) -> (txt: String, srt: String)? {
+        TranscriptSidecarWriter.write(lines, stem: SidecarSet.stem(of: rec.url))
     }
 
     private func installDeviceListener() {
@@ -2085,11 +2248,19 @@ enum SysTrackWatchdog {
     /// ② 再跳觀察期內、且這次重建是因為持續無聲 → 不跳(否則 20 秒的重建會蓋過
     ///    60 秒的再跳門檻)。
     /// ③ 其他(裝置移除、輸出裝置變更…) → 照舊報「已自動重新啟動」。
+    /// PERM-05(#2673):④ 輸出裝置確定不是藍牙時,「已武裝無聲警告」的合併訊息改成不提 HFP 的那句(同首跳);藍牙或未知照舊。
     static func rebuildBanner(silentWarned: Bool, reason: SysRebuildReason,
-                              inRewarnGrace: Bool) -> RecordingWarning? {
-        if silentWarned { return .sysRebuildMaybeStillSilent }
+                              inRewarnGrace: Bool, outputTransport: OutputTransport = .unknown) -> RecordingWarning? {
+        if silentWarned { return outputTransport == .other ? .sysSilentCheckPermission : .sysRebuildMaybeStillSilent }
         if inRewarnGrace, reason == .persistentSilence { return nil }
         return .sysRestarted(reason: reason)
+    }
+
+    /// PERM-05(#2673):對方軌持續無訊號的首跳橫幅。確定非藍牙 ⇒ 先請確認會議聲音在這台 Mac 播放,再提「可能是系統音訊錄製權限
+    /// 沒開」(沒有 API 可查,只能推論),GUI 多一顆「開啟系統設定」;藍牙 ⇒ 既有 HFP 說法一字不改;**未知**(tap 還沒建好／建失敗／
+    /// 切換中)也走舊文案,不拿不新鮮的快照推論權限(二審)。
+    static func silentBanner(outputTransport: OutputTransport) -> RecordingWarning {
+        outputTransport == .other ? .sysSilentCheckPermission : .sysSilent
     }
 
     /// 是否該嘗試自動重建對方軌 tap:buffer 停止流動(裝置移除)**或**持續真靜音

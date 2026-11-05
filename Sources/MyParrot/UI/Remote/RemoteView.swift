@@ -17,36 +17,40 @@ struct RemoteView: View {
     @Environment(\.colorScheme) private var colorScheme
     private var isDark: Bool { colorScheme == .dark }
     @State private var loc = Localizer.shared
-    @State private var breathe = false
     @State private var micPopover = false
     @State private var sleepy = false
     @FocusState private var titleFocused: Bool
 
     static let width: CGFloat = 320
 
+    /// PERF-02:整支遙控器只有這一個 10 Hz 時鐘在動(錄音中／暫停中／轉稿中且非 reduceMotion);紅光、呼吸燈、鸚鵡、電平環都吃同一個 tick,
+    /// 每秒最多 10 次 SwiftUI pass(每個 pass 都要付一次 NSHostingView 整窗 layout,所以不能一個葉子一個時鐘)。
+    private var decorActive: Bool {
+        !reduceMotion && (controller.state == .recording || controller.state == .paused || controller.isTranscribing)
+    }
+
     var body: some View {
-        VStack(spacing: 10) {
-            statusPill
-            micPill
-            titlePill
-            HStack(alignment: .bottom, spacing: 4) {
-                DialView(controller: controller)
-                MascotBuddy(pose: pose)
+        DecorTicker(active: decorActive) { tick in
+            VStack(spacing: 10) {
+                statusPill(tick: tick)
+                micPill
+                titlePill
+                HStack(alignment: .bottom, spacing: 4) {
+                    DialView(controller: controller, tick: tick, animating: decorActive && controller.state == .recording)
+                    MascotBuddy(pose: pose, tick: tick)
+                }
+                .padding(.top, 6)
+                signalRow.frame(height: 16).padding(.top, -4)
+                keyRow
             }
-            .padding(.top, 6)
-            signalRow.frame(height: 16).padding(.top, -4)
-            keyRow
         }
         .padding(EdgeInsets(top: 14, leading: 16, bottom: 16, trailing: 16))
         .frame(width: Self.width)
         .background(slab)
-        .onAppear { updateBreathing() }
         .onChange(of: controller.state) { old, new in
-            updateBreathing()
             // 新一場開錄 ⇒ 上一場的標記清掉(M5 之前標記只累計在 uiState,M5 起寫進筆記)。
             if new == .recording, old == .idle { uiState.markers.removeAll() }
         }
-        .onChange(of: reduceMotion) { _, _ in updateBreathing() }
         // 待錄音閒置 5 分鐘 ⇒ 打瞌睡;狀態一變就醒(task 取消)。
         .task(id: controller.state) {
             sleepy = false
@@ -85,13 +89,11 @@ struct RemoteView: View {
         }
     }
 
-    private func updateBreathing() {
-        guard controller.state == .recording, !reduceMotion else {
-            var t = Transaction(); t.disablesAnimations = true
-            withTransaction(t) { breathe = false }
-            return
-        }
-        withAnimation(.easeInOut(duration: 1).repeatForever(autoreverses: true)) { breathe = true }
+    /// 狀態點:錄音中呼吸(opacity 0.5↔1,1 s 一去一回);PERF-02:吃遙控器根的 10 Hz tick 查相位,不用 repeatForever。
+    private func breathDot(tick: Date) -> some View {
+        let breathing = controller.state == .recording && !reduceMotion
+        return Circle().fill(stateColor).frame(width: 9, height: 9)
+            .opacity(breathing ? 0.5 + 0.5 * DecorClock.eased(DecorClock.triangle(at: tick, period: 2.0)) : 1)
     }
 
     // MARK: 板身
@@ -120,7 +122,7 @@ struct RemoteView: View {
 
     // MARK: 三顆藥丸
 
-    private var statusPill: some View {
+    private func statusPill(tick: Date) -> some View {
         HStack(spacing: 7) {
             // M4(K1):拖曳整個控制欄換邊;放到內容欄上以視窗中線判定(WorkspaceView 的放下處理)。
             Text("⋮⋮").font(.system(size: 11)).foregroundStyle(.tertiary)
@@ -132,8 +134,7 @@ struct RemoteView: View {
                 }
                 .help(L("拖曳控制欄換邊"))
                 .accessibilityLabel(L("拖曳控制欄換邊"))
-            Circle().fill(stateColor).frame(width: 9, height: 9)
-                .opacity(controller.state == .recording ? (breathe ? 1 : 0.5) : 1)
+            breathDot(tick: tick)
             Text(L(stateKey)).font(.system(size: 12, weight: .semibold)).foregroundStyle(stateColor)
                 .lineLimit(1).fixedSize()
             Spacer(minLength: 4)
@@ -263,7 +264,7 @@ struct RemoteView: View {
             RemoteKey(icon: "flag.fill", label: L("標記"), badge: "⌘⇧M",
                       enabled: controller.state == .recording || controller.state == .paused,
                       count: uiState.markers.count) {
-                uiState.addMarker(at: controller.elapsed)
+                uiState.addMarker(at: controller.elapsedExact)
             }
             RemoteKey(icon: windowMode.mode.icon, label: L("模式"), badge: "⌘1", enabled: true) { windowMode.cycle() }
             RemoteKey(icon: "gearshape", label: L("設定"), badge: "⌘,", enabled: true) { uiState.showSettings = true }

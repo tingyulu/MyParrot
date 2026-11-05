@@ -10,8 +10,10 @@ struct NotesPane: View {
 
     var body: some View {
         if let n = uiState.notes {
+            // PERF-04:工具列只吃 canMark(狀態,少變);elapsed 留在閉包、按下標記才讀,筆記欄不再跟時鐘每 0.25 s 重建。
             NotesEditorPane(store: n.store, proxy: n.proxy,
-                            markerElapsed: { controller.state == .recording || controller.state == .paused ? controller.elapsed : nil },
+                            canMark: controller.state == .recording || controller.state == .paused,
+                            markerElapsed: { controller.state == .recording || controller.state == .paused ? controller.elapsedExact : nil },
                             contextLabel: contextLabel(n), contextIcon: contextIcon(n),
                             onTimestamp: { t in seek(n, to: t) })
         } else {

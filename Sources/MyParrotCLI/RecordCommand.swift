@@ -276,6 +276,12 @@ final class RecordSession {
         // 照樣 SIGABRT)。CLI 轉錄走 SpeechAnalyzer/whisper,本就零語音辨識 TCC
         // (decisions.md D7),不請求不影響任何功能。
         controller.micPermission = await AVCaptureDevice.requestAccess(for: .audio)
+        controller.refreshPermissionStatus()   // PERM-01
+        // PERM-12(#2673):麥克風被拒／受限 ⇒ 一行提示後照常錄(只錄對方);🚫 不加互動確認(CLI 可能在腳本裡跑)。
+        if PermissionHints.recordGateBlocks(mic: controller.micAuthorization) {
+            let hint = "麥克風權限未開啟,這段只會錄到對方;開啟:open \"\(PermissionKind.microphone.settingsURL.absoluteString)\""
+            if jsonMode { Output.jsonEvent(["event": "warning", "message": hint]) } else { Output.errLine("⚠️ " + hint) }
+        }
 
         // 引擎/語言(旗標 > config > 預設)。
         let engineRaw = options.engine ?? config.engine

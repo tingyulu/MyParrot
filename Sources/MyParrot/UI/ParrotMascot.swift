@@ -1,21 +1,23 @@
 import SwiftUI
+import MyParrotCore
 
 /// MyParrot mascot — a chibi parrot wearing headphones. While recording it
 /// "sings": beak opens/closes, music notes float up, the head bobs, and
 /// sound-wave rings pulse. Idle = still.
-/// UI-32(2026-08-24):尊重系統「減少動態效果」——開啟時不啟動任何 repeatForever
-/// 動畫、藏聲波/音符,錄音狀態改由靜止姿勢與其他 UI(紅點/狀態列)傳達。
+/// UI-32(2026-08-24):尊重系統「減少動態效果」——開啟時不動、藏聲波/音符,錄音狀態改由靜止姿勢與其他 UI(紅點/狀態列)傳達。
+/// PERF-02(2026-11-04,TEST_PLAN Z 節,Eric A1):四個 `repeatForever`(點頭／聲波／唱歌／音符)＋0.35 s 換幀的 TimelineView
+/// 合併成**一個** 10 Hz `DecorTicker`,每個 tick 用 `DecorClock` 查相位直接設值、不包動畫——之前每一幀都讓 SwiftUI 跑整窗
+/// layout(錄音中主執行緒被吃 40～70%、打筆記卡)。週期沿用舊動畫:點頭 1.0 s 往復、聲波 1.7 s 單向、唱歌 0.32 s 往復、音符 1.25 s 單向。
 struct ParrotMascot: View {
     var size: CGFloat = 58
     var isRecording: Bool = false
+    /// PERF-02:外面(遙控器根)已有 10 Hz 時鐘就把 tick 傳進來;nil ＝ 自己起一個(迷你模式)。
+    var tick: Date? = nil
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var bob = false
-    @State private var ring = false
-    @State private var sing = false
-    @State private var notes = false
 
     private var s: CGFloat { size }
+    private var live: Bool { isRecording && !reduceMotion }
 
     /// UI-32:PNG 幀模式——app bundle 的 Resources/mascot/{idle,sing}.png
     /// (idle=收翅閉嘴/sing=張翅張嘴;錄音中輪替=拍翅+唱歌,UI-33b Eric 2026-08-24 06:32)。
@@ -37,49 +39,39 @@ struct ParrotMascot: View {
     }()
 
     var body: some View {
-        ZStack {
-            if isRecording && !reduceMotion { rings }
-            character
-                .rotationEffect(.degrees(isRecording && bob ? 3 : -3))
-                .offset(y: isRecording && bob ? -s * 0.03 : 0)
-            if isRecording && !reduceMotion { musicNotes }
-        }
-        .frame(width: s, height: s)
-        .onAppear { if !reduceMotion { startAnimations() } }
-        .onChange(of: reduceMotion) { _, rm in
-            if rm {
-                // 立即停:值改回靜止,且不帶動畫(中斷 repeatForever)。
-                var t = Transaction(); t.disablesAnimations = true
-                withTransaction(t) { bob = false; ring = false; sing = false; notes = false }
-            } else {
-                startAnimations()
-            }
+        if let tick {
+            animated(at: tick)
+        } else {
+            DecorTicker(active: live) { date in animated(at: date) }
         }
     }
 
-    private func startAnimations() {
-        withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) { bob = true }
-        withAnimation(.easeOut(duration: 1.7).repeatForever(autoreverses: false)) { ring = true }
-        withAnimation(.easeInOut(duration: 0.32).repeatForever(autoreverses: true)) { sing = true }
-        withAnimation(.easeIn(duration: 1.25).repeatForever(autoreverses: false)) { notes = true }
+    /// 相位全在這裡算一次;不錄音／reduceMotion 時 date 是固定值、下面都走靜止分支。
+    private func animated(at date: Date) -> some View {
+        let bob = live ? DecorClock.eased(DecorClock.triangle(at: date, period: 2.0)) : 0        // 0→1→0,頭 −3°↔+3°
+        let ringP = live ? DecorClock.easeOut(DecorClock.sawtooth(at: date, period: 1.7)) : 0   // 0→1 單向,擴散淡出
+        let notesP = live ? DecorClock.easeIn(DecorClock.sawtooth(at: date, period: 1.25)) : 0  // 0→1 單向,上飄淡出
+        let open = live && DecorClock.on(at: date, period: 0.35)                                   // PNG 幀開合
+        let beak = live ? DecorClock.eased(DecorClock.triangle(at: date, period: 0.64)) : 0      // 向量嘴 0.32 s 往復
+        return ZStack {
+            if live { rings(ringP) }
+            character(open: open, beak: beak)
+                .rotationEffect(.degrees(live ? -3 + 6 * bob : -3))
+                .offset(y: live ? -s * 0.03 * bob : 0)
+            if live { musicNotes(notesP) }
+        }
+        .frame(width: s, height: s)
     }
 
     /// PNG 幀優先,無資產回落向量 parrot。
     /// 換幀不能靠 withAnimation 的布林(布林不可插值,repeatForever 對「離散的
     /// 圖片切換」無效——設成 true 後就停住,嘴一直張著不動;Eric 2026-08-24 06:06
-    /// 真機抓到)。改 TimelineView 定時驅動,錄音中每 0.35s 開合一次。
-    @ViewBuilder private var character: some View {
+    /// 真機抓到)。改定時驅動,錄音中每 0.35s 開合一次(PERF-02 起由同一個 DecorTicker 供相位)。
+    @ViewBuilder private func character(open: Bool, beak: Double) -> some View {
         if let f = Self.pngFrames {
-            if isRecording && !reduceMotion {
-                TimelineView(.periodic(from: .now, by: 0.35)) { ctx in
-                    let open = Int(ctx.date.timeIntervalSinceReferenceDate / 0.35) % 2 == 0
-                    frameImage(open ? f.sing : f.idle)
-                }
-            } else {
-                frameImage(f.idle)
-            }
+            frameImage(open ? f.sing : f.idle)
         } else {
-            parrot
+            parrot(beak: beak)
         }
     }
 
@@ -91,27 +83,28 @@ struct ParrotMascot: View {
             .frame(width: s, height: s)
     }
 
-    // Pulsing sound-wave rings while recording.
-    private var rings: some View {
+    // Pulsing sound-wave rings while recording. p: 0(小而亮)→1(大而透明)。
+    private func rings(_ p: Double) -> some View {
         ZStack {
             Circle().stroke(MP.blue, lineWidth: 2).frame(width: s * 0.7, height: s * 0.7)
-                .scaleEffect(ring ? 1.5 : 0.5).opacity(ring ? 0 : 0.5)
+                .scaleEffect(0.5 + 1.0 * p).opacity(0.5 * (1 - p))
             Circle().stroke(MP.coral, lineWidth: 2).frame(width: s * 0.7, height: s * 0.7)
-                .scaleEffect(ring ? 1.35 : 0.5).opacity(ring ? 0 : 0.4)
+                .scaleEffect(0.5 + 0.85 * p).opacity(0.4 * (1 - p))
         }
     }
 
-    // ♪ ♫ rising from the beak and fading.
-    private var musicNotes: some View {
+    // ♪ ♫ rising from the beak and fading. p: 0(嘴邊、實)→1(上方、透明)。
+    private func musicNotes(_ p: Double) -> some View {
         ZStack {
             Text("♪").font(.system(size: s * 0.22, weight: .bold)).foregroundStyle(MP.coral)
-                .offset(x: s * 0.30, y: notes ? -s * 0.42 : -s * 0.02).opacity(notes ? 0 : 0.95)
+                .offset(x: s * 0.30, y: -s * (0.02 + 0.40 * p)).opacity(0.95 * (1 - p))
             Text("♫").font(.system(size: s * 0.18, weight: .bold)).foregroundStyle(MP.blue)
-                .offset(x: s * 0.42, y: notes ? -s * 0.52 : s * 0.02).opacity(notes ? 0 : 0.85)
+                .offset(x: s * 0.42, y: s * (0.02 - 0.54 * p)).opacity(0.85 * (1 - p))
         }
     }
 
-    private var parrot: some View {
+    /// 向量鸚鵡;`beak` 0＝閉嘴、1＝張嘴(下嘴殼下落 s*0.065)。
+    private func parrot(beak: Double) -> some View {
         ZStack {
             Ellipse().fill(MP.blue).frame(width: s * 0.58, height: s * 0.64).offset(y: s * 0.14)
             Ellipse().fill(Color(red: 0.71, green: 0.83, blue: 0.96))
@@ -130,7 +123,7 @@ struct ParrotMascot: View {
             BeakTri().fill(MP.coral).frame(width: s * 0.16, height: s * 0.12).offset(y: -s * 0.05)
             BeakTri().fill(Color(red: 0.66, green: 0.27, blue: 0.13))
                 .frame(width: s * 0.14, height: s * 0.10).rotationEffect(.degrees(180))
-                .offset(y: (isRecording && sing) ? s * 0.06 : -s * 0.005)
+                .offset(y: -s * 0.005 + s * 0.065 * beak)
             // headphones
             Band().stroke(headphone, style: StrokeStyle(lineWidth: s * 0.05, lineCap: .round))
                 .frame(width: s * 0.62, height: s * 0.2).offset(y: -s * 0.30)

@@ -42,7 +42,7 @@ enum ReminderWiring {
                 return
             }
             if !title.isEmpty { c.currentTitle = title }
-            RecordingConsent.confirmThen { c.startRecording() }   // MAS-17:通知按鈕也是 GUI 入口
+            RecordingGate.confirmThen(c) { c.startRecording() }   // MAS-17＋PERM-03:通知按鈕也是 GUI 入口
         }
 
         // 「停止錄音」鈕 → 既有 stop()(CAL-11 只提醒,按了才停)。

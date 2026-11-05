@@ -46,6 +46,7 @@ struct RootView: View {
         // 保證顯示、靠右、窄視窗不會被收進「»」)。原生標題列置中顯示視窗名。
         .sheet(isPresented: $uiState.showSettings) { SettingsView(controller: controller, updates: updates, uiState: uiState) }
         .task {
+            controller.refreshPermissionStatus()   // PERM-01(#2673):讀四態狀態不跳框;下面的 debugSkip 只跳過「請求」
             #if DEBUG
             // #949 驗證用(只有 DEBUG 建置):`-debugSkipPermissionRequest YES` ⇒ 啟動不請麥克風／語音辨識權限。
             // 從 harness 直接執行 .build/debug/MyParrot 時 TCC 歸因到宿主 app,一請就跳框或 SIGABRT;

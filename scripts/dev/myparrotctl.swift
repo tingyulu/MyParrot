@@ -33,6 +33,7 @@
 //   myparrotctl transcribe-policy get|set <immediately|whenIdle|never> /tmp/r.json ; transcribe-idle status|force /tmp/r.json   #2483 E:重轉時機、待閒置重轉(force＝忽略閒置條件立刻重轉一筆)
 //   myparrotctl afm status|force <deviceNotEligible|appleIntelligenceNotEnabled|modelNotReady|unknown|unsupported>|clear /tmp/r.json   #2438 Phase 3a:Apple 本機模型可用性(force＝DEBUG 覆寫,校正與會議記錄都看得到;state 也回 afm)
 //   myparrotctl settings open /tmp/r.json ; window mini /tmp/r.json ; dismiss-warning /tmp/r.json
+//   myparrotctl perf stalls|reset|block <ms> /tmp/r.json   PERF-07(#2549):主執行緒卡頓偵測器(背景每 100 ms ping main,>100 ms 算 stall):次數／最大／p95／量測秒;block＝故意卡 N ms 當正控
 //   myparrotctl mic list /tmp/r.json ; mic select <index|名稱片段> /tmp/r.json   AUD-38 切麥(錄音中＝熱切換;state 也帶 isSwitchingMic、mic)
 //   myparrotctl snapshot /tmp/shot.png [light|dark] [main|settings|mini]   圖＝結果;另有 shot.png.json
 //   myparrotctl window-shot /tmp/win.png [main|sheet|alert]   真視窗截圖(自截,不需螢幕錄製權限;#2438);另有 win.png.json

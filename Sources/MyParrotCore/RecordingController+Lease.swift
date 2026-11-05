@@ -1,4 +1,5 @@
 import Foundation
+import os
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -132,6 +133,7 @@ extension RecordingController {
     func stopOwnerTimer() {
         ownerTimer?.invalidate()
         ownerTimer = nil
+        Self.ownerStateQueue.sync {}   // PERF-05 二審:等背景佇列裡還沒寫完的 tick 落地,之後釋放租約／刪 state 才不會被舊 tick 蓋回
     }
 
     /// 心跳間隔(brief §9 預設 2 秒)。
@@ -237,12 +239,55 @@ extension RecordingController {
         guard externalWatcher == nil else { return }
         // C2:監看 <錄音夾>/.myparrot(租約/state/commands)與錄音夾頂層;舊位置 ~/.config/myparrot 也看著(10/20 版 CLI 相容)。
         let w = ExternalRecordingWatcher(directories: Self.watchDirectories(for: recordingsDir)) { [weak self] in
-            Task { @MainActor in self?.refreshExternal() }
+            // PERF-05:租約／state／目錄列舉在背景做,只把結果拿回 main 比對(錄音夾幾百個檔時列舉＋排序曾佔主執行緒 3%)。
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let seq = self.nextExternalSeq()
+                let dir = self.recordingsDir, selfSession = self.leaseHolder != nil ? self.sessionId : nil, hasLease = self.leaseHolder != nil
+                let snap = await Task.detached(priority: .utility) {
+                    Self.externalSnapshot(seq: seq, recordingsDir: dir, selfSessionId: selfSession, hasLease: hasLease)
+                }.value
+                self.applyExternal(snap)
+            }
         }
         externalWatcher = w
         w.start()
         refreshExternal()
     }
+
+    /// 一次「看外面」要讀的東西(全是檔案系統):租約(新位置＋舊位置)、state.json、舊版 pid、錄音夾頂層簽章。純讀,任何執行緒可跑。
+    /// 二審:帶 `seq`(發出的序號)與 `recordingsDir`(讀的是哪個夾),`applyExternal` 只套「最新且還是這個夾」的,慢的舊掃描晚到不會倒退;
+    /// `signature == nil` ＝ 列舉失敗(權限／磁碟),不是空目錄,不動簽章也不重掃。
+    struct ExternalSnapshot: Sendable {
+        var seq: Int
+        var recordingsDir: URL
+        var inspection: LeaseInspection
+        var state: RecordingStateFile?
+        var legacyPID: Int32?
+        var selfSessionId: String?
+        var signature: [String]?
+    }
+
+    nonisolated static func externalSnapshot(seq: Int, recordingsDir: URL, selfSessionId: String?, hasLease: Bool) -> ExternalSnapshot {
+        // C2:先看新位置(<錄音夾>/.myparrot),沒有活租約再看舊位置(~/.config/myparrot,10/20 版 CLI);state.json 同理。
+        let inspection = effectiveInspection(primary: RecordingLeaseHolder.inspect(),
+                                             legacy: RecordingLeaseHolder.inspect(in: MyParrotPaths.configDir))
+        let state = RecordingStateStore.read() ?? RecordingStateStore.read(in: MyParrotPaths.configDir)
+        let legacyPID = hasLease ? nil : RecordingStateStore.activePID()
+        let sig: [String]?
+        do {
+            sig = try FileManager.default.contentsOfDirectory(atPath: recordingsDir.path)
+                .filter { $0.hasSuffix(".m4a") || $0.hasSuffix(".caf") || $0.hasSuffix(".txt") }.sorted()
+        } catch {
+            os_log(.error, "MyParrot watch: 錄音夾列舉失敗,這輪不動簽章 %{private}@", "\(error)")
+            sig = nil
+        }
+        return ExternalSnapshot(seq: seq, recordingsDir: recordingsDir, inspection: inspection, state: state,
+                                legacyPID: legacyPID, selfSessionId: selfSessionId, signature: sig)
+    }
+
+    /// 發一個序號(main)。監看者與同步 refresh 共用同一條序號線。
+    private func nextExternalSeq() -> Int { externalSeq += 1; return externalSeq }
 
     /// C2 唯一一處決定「監看哪些目錄」:夾內協定目錄、錄音夾頂層、舊位置(10/20 版 CLI 相容)。start／換夾／重探都用它。
     nonisolated static func watchDirectories(for dir: URL) -> [URL] {
@@ -256,20 +301,27 @@ extension RecordingController {
 
     /// 重算 `externalRecording`;別人那場結束/死掉 ⇒ 收割＋重掃列表;資料夾頂層有新檔(別的進程發布了成品)⇒ 重掃列表。
     public func refreshExternal(now: Date = Date()) {
-        let selfSession = leaseHolder != nil ? sessionId : nil
-        let legacyPID = (leaseHolder == nil) ? RecordingStateStore.activePID() : nil
-        // C2:先看新位置(<錄音夾>/.myparrot),沒有活租約再看舊位置(~/.config/myparrot,10/20 版 CLI);state.json 同理。
-        let inspection = Self.effectiveInspection(primary: RecordingLeaseHolder.inspect(),
-                                                  legacy: RecordingLeaseHolder.inspect(in: MyParrotPaths.configDir))
-        let state = RecordingStateStore.read() ?? RecordingStateStore.read(in: MyParrotPaths.configDir)
-        let next = Self.computeExternal(inspection: inspection, state: state,
-                                        legacyPID: legacyPID, selfSessionId: selfSession, now: now)
+        // 同步版(啟動、換夾、DebugControl):在呼叫端的執行緒讀完就套。監看者走背景快照 → applyExternal。
+        applyExternal(Self.externalSnapshot(seq: nextExternalSeq(), recordingsDir: recordingsDir,
+                                            selfSessionId: leaseHolder != nil ? sessionId : nil,
+                                            hasLease: leaseHolder != nil), now: now)
+    }
+
+    /// 把一份快照套到狀態上(main)。快照可能是 100 ms 前在背景讀的:`selfSessionId` 用快照當時的值,跟讀檔的時刻一致。
+    /// 二審:序號比已套用的舊、或讀的不是現在這個錄音夾(中途換夾)⇒ 整份丟掉。
+    func applyExternal(_ snap: ExternalSnapshot, now: Date = Date()) {
+        guard snap.seq > externalAppliedSeq, snap.recordingsDir == recordingsDir else { return }
+        externalAppliedSeq = snap.seq
+        let next = Self.computeExternal(inspection: snap.inspection, state: snap.state,
+                                        legacyPID: snap.legacyPID, selfSessionId: snap.selfSessionId, now: now)
         let ended = externalRecording != nil && next == nil
         if next != externalRecording { externalRecording = next }
         if ended { reapInprogress() }
-        let sig = ((try? FileManager.default.contentsOfDirectory(atPath: recordingsDir.path)) ?? [])
-            .filter { $0.hasSuffix(".m4a") || $0.hasSuffix(".caf") || $0.hasSuffix(".txt") }.sorted()
-        if ended || sig != recordingsDirSignature {
+        if ended {
+            // 別人那場結束 ⇒ 收割後**一定**重掃(成品剛發布到頂層);列舉失敗只影響簽章(留舊值,下一輪 2 s 保底再比)。
+            if let sig = snap.signature { recordingsDirSignature = sig }
+            loadRecordings()
+        } else if let sig = snap.signature, sig != recordingsDirSignature {
             recordingsDirSignature = sig
             loadRecordings()
         }
@@ -326,9 +378,30 @@ extension RecordingController {
     }
 
     /// GUI owner 寫 state.json(每 0.5 秒＋暫停／繼續當下)。只在持有租約時寫。
-    func writeOwnerState() {
-        guard leaseHolder != nil, leaseOwner == "gui" else { return }
-        try? RecordingStateStore.write(ownerStateFile())
+    /// PERF-05:內容在 main 組好、寫檔到背景序列佇列(每 0.5 s 的 tick 不再在主執行緒做磁碟 I/O);
+    /// 狀態切換當下(開錄／暫停／繼續／停止)用 `sync: true`,檔案先落地再往下走,CLI 讀到的順序不變(REC-34)。
+    nonisolated static let ownerStateQueue = DispatchQueue(label: "MyParrot.ownerState", qos: .utility)
+    /// 回 false ＝ 同步寫失敗(二審第二輪:狀態切換當下寫不進去要讓上層與使用者知道——設 `lastError`,不再只有 log);
+    /// 非同步 tick 的失敗只 os_log、回 true(下一個 0.5 s 會再寫)。
+    @discardableResult
+    func writeOwnerState(sync: Bool = false) -> Bool {
+        guard leaseHolder != nil, leaseOwner == "gui" else { return true }
+        let file = ownerStateFile()
+        let failure = OSAllocatedUnfairLock<String?>(initialState: nil)
+        let work: @Sendable () -> Void = {
+            do { try RecordingStateStore.write(file) }
+            catch {
+                os_log(.error, "MyParrot lease: state.json 寫入失敗 %{private}@", "\(error)")
+                failure.withLock { $0 = error.localizedDescription }
+            }
+        }
+        guard sync else { Self.ownerStateQueue.async(execute: work); return true }
+        Self.ownerStateQueue.sync(execute: work)
+        if let msg = failure.withLock({ $0 }) {
+            lastError = "state.json: \(msg)"
+            return false
+        }
+        return true
     }
 
     // MARK: - 收割(REC-32)

@@ -12,6 +12,8 @@ enum MascotPose: Equatable {
 /// reduceMotion 一律只換幀不動,氣泡照顯示。
 struct MascotBuddy: View {
     let pose: MascotPose
+    /// PERF-02:遙控器根的 10 Hz tick(錄音中拍翅／暫停喘氣／轉稿搖頭都吃它);`.distantPast`＝靜止。
+    var tick: Date = .distantPast
     var size: CGFloat = 76
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var cheer = false
@@ -71,17 +73,17 @@ struct MascotBuddy: View {
     @ViewBuilder private var character: some View {
         switch pose {
         case .recording:
-            ParrotMascot(size: size, isRecording: true)
+            ParrotMascot(size: size, isRecording: true, tick: tick)
         case .idle:
             ParrotMascot(size: size, isRecording: false).modifier(Nod(active: !reduceMotion))
         case .sleep:
             if let f = Self.extraFrames["sleep"] { frame(f) } else { ParrotMascot(size: size) }
         case .paused:
             if let f = Self.extraFrames["pant"] {
-                frame(f).modifier(Breathe(active: !reduceMotion))
+                frame(f).modifier(Breathe(active: !reduceMotion, tick: tick))
             } else {
                 ParrotMascot(size: size).rotationEffect(.degrees(-28)).offset(x: -10, y: 2)
-                    .modifier(Breathe(active: !reduceMotion))
+                    .modifier(Breathe(active: !reduceMotion, tick: tick))
             }
         case .finished:
             // 舉翅「好耶」:sing 幀單次伸懶腰(0 → −10° → 0,2.4 秒),之後回站姿。
@@ -92,7 +94,7 @@ struct MascotBuddy: View {
         case .alarm:
             ParrotMascot(size: size).rotationEffect(.degrees(15))
         case .transcribing:
-            ParrotMascot(size: size).modifier(Sway(active: !reduceMotion))
+            ParrotMascot(size: size).modifier(Sway(active: !reduceMotion, tick: tick))
         }
     }
 
@@ -119,31 +121,23 @@ private struct Nod: ViewModifier {
     }
 }
 
-/// 已暫停:趴著喘氣,身體一鼓一縮(1.3 秒往復)。
+/// 已暫停:趴著喘氣,身體一鼓一縮(1.3 秒往復)。PERF-02:持續動畫改吃遙控器根的 10 Hz tick 查相位(暫停中也可能在打筆記)。
 private struct Breathe: ViewModifier {
     let active: Bool
+    let tick: Date
     func body(content: Content) -> some View {
-        if active {
-            content.phaseAnimator([false, true]) { view, phase in
-                view.scaleEffect(x: phase ? 1.05 : 1.0, y: phase ? 0.96 : 1.0, anchor: .bottom)
-            } animation: { _ in .easeInOut(duration: 1.3) }
-        } else {
-            content
-        }
+        let p = active ? DecorClock.eased(DecorClock.triangle(at: tick, period: 2.6)) : 0
+        content.scaleEffect(x: 1 + 0.05 * p, y: 1 - 0.04 * p, anchor: .bottom)
     }
 }
 
-/// 轉稿中:低頭聽、左右輕搖(2 秒往復)。
+/// 轉稿中:低頭聽、左右輕搖(2 秒往復)。PERF-02:同上(轉稿中使用者常在補筆記)。
 private struct Sway: ViewModifier {
     let active: Bool
+    let tick: Date
     func body(content: Content) -> some View {
-        if active {
-            content.phaseAnimator([false, true]) { view, phase in
-                view.rotationEffect(.degrees(phase ? 3 : -3))
-            } animation: { _ in .easeInOut(duration: 1.0) }
-        } else {
-            content
-        }
+        let p = active ? DecorClock.eased(DecorClock.triangle(at: tick, period: 2.0)) : 0.5
+        content.rotationEffect(.degrees(-3 + 6 * p))
     }
 }
 

@@ -125,17 +125,34 @@ final class WhisperLiveTranscriber: LiveTranscribing, @unchecked Sendable {
         var inflight = 0
         var dropped = 0
         var gate = HallucinationGate()
+        /// TR-29:這一段的 generation,start() 在同一個 lock 內與 chunker 一起重設;塊與代數永遠在同一臨界區取得(二審第二輪)。
+        var gen = 0
+        /// TR-31(二審):「還收不收新塊」與 inflight 同一把鎖——stop 在數 inflight 的同一臨界區把它關掉,
+        /// 之後 append 連塊都不產生,expected 數完就不會再長(原本只靠 main 上的 `running`,render 執行緒讀它沒同步)。
+        var accepting = false
         let lock = NSLock()
         init(isYou: Bool) { self.isYou = isYou }
-        /// 同步包裝:供 async context 呼叫(NSLock 禁止在 async 函式內直接 lock)。
-        func finishOne() { lock.lock(); inflight -= 1; lock.unlock() }
-        func checkRepeat(_ text: String) -> Bool { lock.lock(); defer { lock.unlock() }; return gate.check(text) }
+        /// 辨識 task 回來時的收尾(同步包裝:NSLock 禁止在 async 函式內直接 lock)。二審第三輪:先驗代數——
+        /// 這個塊若屬於上一段,**不碰這一段的 inflight／gate**,回 nil 讓呼叫端整個略過(commit 也會因舊代被擋);
+        /// 通過代數才扣 inflight、過幻覺閘,回要上屏的字(空字串＝抑制)。
+        func complete(generation gen: Int, text: String) -> String? {
+            lock.lock(); defer { lock.unlock() }
+            guard gen == self.gen else { return nil }
+            inflight -= 1
+            return gate.check(text) ? text : ""
+        }
     }
     private let you = Channel(isYou: true)
     private let other = Channel(isYou: false)
 
-    private var lines: [TranscriptLine] = []
-    private let linesLock = NSLock()
+    /// TR-29(#2672):行列表與 generation 共用 `LiveLineBuffer`;stop() 的尾塊在 Task.detached 裡幾秒後才回來,
+    /// 若那時下一段已開錄,帶舊代的 commit 不會塞進新段。TR-31(#2676):外層 `LiveLineStore` 把它收進已關的那一段,
+    /// 由 `LiveStopDrain` 在所有在飛的塊都回來(或超時)後交回。
+    private let store = OSAllocatedUnfairLock(initialState: LiveLineStore())
+    /// TR-31:每次 stop 一個 drain,以代數為鍵;塊回來時與 `Channel.complete` 在同一臨界區查(見 `finishChunk`),
+    /// 「停止時數在飛的塊」與「塊回來扣數」才對得上。
+    private let drainLock = OSAllocatedUnfairLock()
+    private var drains: [Int: LiveStopDrain] = [:]
     private var startDate = Date()
     private var running = false
 
@@ -147,10 +164,11 @@ final class WhisperLiveTranscriber: LiveTranscribing, @unchecked Sendable {
         langCode = WhisperLang.code(for: locale)
         prompt = WhisperLang.prompt(for: langCode)
         startDate = Date()
-        linesLock.lock(); lines = []; linesLock.unlock()
+        if running { stop(completion: nil) }   // 重入保護:上一段照 stop 收尾(尾塊進它自己那段)
+        let gen = store.withLock { $0.start() }   // TR-29:清上一段、換代;TR-31:標開著
         for ch in [you, other] {
             ch.lock.lock()
-            ch.chunker = VadChunker(); ch.inflight = 0; ch.dropped = 0; ch.gate = HallucinationGate()
+            ch.chunker = VadChunker(); ch.inflight = 0; ch.dropped = 0; ch.gate = HallucinationGate(); ch.gen = gen; ch.accepting = true
             ch.lock.unlock()
         }
         running = true
@@ -163,9 +181,11 @@ final class WhisperLiveTranscriber: LiveTranscribing, @unchecked Sendable {
     private func append(_ buffer: AVAudioPCMBuffer, to ch: Channel) {
         guard running else { return }
         ch.lock.lock()
+        guard ch.accepting else { ch.lock.unlock(); return }   // stop 已在同一把鎖內關掉:不再切塊、不再加 inflight
         let pcm16k = ch.conv.convert(buffer)
         let chunks = ch.chunker.feed(pcm16k)
         var toRun: [VadChunker.Chunk] = []
+        let gen = ch.gen   // 與 chunks 同一臨界區
         for c in chunks {
             if ch.inflight >= 2 {
                 ch.dropped += 1
@@ -177,16 +197,16 @@ final class WhisperLiveTranscriber: LiveTranscribing, @unchecked Sendable {
             }
         }
         ch.lock.unlock()
-        for c in toRun { transcribe(c, ch: ch) }
+        for c in toRun { transcribe(c, ch: ch, generation: gen) }
     }
 
-    private func transcribe(_ chunk: VadChunker.Chunk, ch: Channel) {
+    private func transcribe(_ chunk: VadChunker.Chunk, ch: Channel, generation gen: Int) {
         let t0 = Double(chunk.startOffset) / Double(VadChunker.rate)
         let dur = Double(chunk.samples.count) / Double(VadChunker.rate)
         let lineTime = startDate.addingTimeInterval(t0)
         // 上屏 volatile 佔位(「⋯」),結果回來替換。
         commit(TranscriptLine(isYou: ch.isYou, time: lineTime, text: "⋯",
-                              isFinal: false, start: t0, duration: dur), isYou: ch.isYou)
+                              isFinal: false, start: t0, duration: dur), generation: gen)
         let lang = langCode, prompt = prompt, engine = engine
         Task.detached(priority: .userInitiated) { [weak self, weak ch] in
             var text = ""
@@ -199,44 +219,79 @@ final class WhisperLiveTranscriber: LiveTranscribing, @unchecked Sendable {
                 os_log("MyParrot whisper live: 轉寫失敗 %{public}@", "\(error)")
             }
             guard let self, let ch else { return }
-            ch.finishOne()
             let trimmed = text.trimmingCharacters(in: .whitespaces)
-            let show: String
-            if ch.checkRepeat(trimmed) {
-                show = trimmed
-            } else {
-                show = ""
+            let (show, drain) = self.finishChunk(ch, generation: gen, text: trimmed)
+            // show nil ＝ 聲道已換代(下一段開錄了):不碰新段的 inflight／幻覺閘,但這個塊仍屬上一段,
+            // 照舊代 commit——store 會把它收進那一段的 closing(或已收尾 ⇒ stale 留 log)。
+            if show == nil {
+                os_log("MyParrot whisper live: 上一段的塊才回來,交給那一段收尾(gen %d,%{public}@)", gen, ch.isYou ? "你" : "對方")
+            } else if show == "", !trimmed.isEmpty {
                 os_log("MyParrot whisper live: 疑似幻覺複讀,已抑制上屏(%{public}@)", ch.isYou ? "你" : "對方")
             }
             self.commit(TranscriptLine(isYou: ch.isYou, time: lineTime,
-                                       text: show, isFinal: true, start: t0, duration: dur), isYou: ch.isYou)
+                                       text: show ?? trimmed, isFinal: true, start: t0, duration: dur), generation: gen)
+            drain?.arrive()   // commit 之後才報到:drain 在 main 取走時這一行已經在 store 裡
         }
     }
 
-    /// 同 LiveTranscriber 的合併策略:取代該講者最後一條 volatile,空字串移除,
-    /// final 新增;依 time 排序後回主緒。
-    private func commit(_ line: TranscriptLine, isYou: Bool) {
-        linesLock.lock()
-        if let idx = lines.lastIndex(where: { $0.isYou == isYou && !$0.isFinal }) {
-            if line.text.isEmpty { lines.remove(at: idx) } else { lines[idx] = line }
-        } else if !line.text.isEmpty {
-            lines.append(line)
+    /// TR-31:塊回來的收尾——`Channel.complete`(扣 inflight、過閘)與「這一代有沒有 drain 在等」在同一臨界區,
+    /// 與 `stop(completion:)` 數在飛的塊互斥:一個塊要嘛在停止前就扣掉(不計入 expected、也拿不到 drain),
+    /// 要嘛停止後才回來(計入 expected、拿到 drain 報到一次),不會多報或漏報。
+    private func finishChunk(_ ch: Channel, generation gen: Int, text: String) -> (show: String?, drain: LiveStopDrain?) {
+        drainLock.withLockUnchecked {
+            (ch.complete(generation: gen, text: text), drains[gen])
         }
-        lines.sort { $0.time < $1.time }
-        let snapshot = lines
-        linesLock.unlock()
-        DispatchQueue.main.async { [weak self] in self?.onUpdate?(snapshot) }
     }
 
-    func stop() {
-        guard running else { return }
+    /// 合併策略在 `LiveLineBuffer`(取代該講者最後一條 volatile,空字串移除,final 新增,依 time 排序);排好後回主緒。
+    private func commit(_ line: TranscriptLine, generation gen: Int) {
+        switch store.withLock({ $0.commit(line, generation: gen) }) {
+        case .active:
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                // 二審(第二輪):各 detached task 自己 enqueue,先後沒保證;上屏時重讀最新狀態並再驗代數,
+                // 舊快照不會晚到回畫、新段 reset 後也不會被還在排隊的舊段快照蓋掉;TR-31:段已關也不上屏。
+                let (open, g, lines) = self.store.withLock { ($0.isOpen, $0.generation, $0.lines) }
+                guard open, g == gen else { return }
+                self.onUpdate?(lines)
+            }
+        case .closing:
+            break   // TR-31:上一段 stop() 後才回來的塊——收進那一段、不上屏,LiveStopDrain 收齊後交回
+        case .stale:
+            os_log("MyParrot whisper live: 忽略已收尾那段晚到的塊(gen %d,%{public}@)", gen, line.isYou ? "你" : "對方")
+        }
+    }
+
+    /// TR-31:關掉這一段、送出兩聲道的尾塊;所有在飛的塊(含尾塊)都回來或超時 ⇒ 在 main 交出完整行列表一次。
+    func stop(completion: (@MainActor ([TranscriptLine]) -> Void)?) {
+        guard running, let gen = store.withLock({ $0.close() }) else {
+            if let completion { Task { @MainActor in completion([]) } }
+            return
+        }
         running = false
-        for ch in [you, other] {
-            ch.lock.lock()
-            let tail = ch.chunker.flush()
-            if tail != nil { ch.inflight += 1 }
-            ch.lock.unlock()
-            if let tail { transcribe(tail, ch: ch) }
+        var tails: [(VadChunker.Chunk, Channel)] = []
+        let store = self.store
+        let drain = drainLock.withLockUnchecked { () -> LiveStopDrain in
+            var pending = 0
+            for ch in [you, other] {
+                ch.lock.lock()
+                ch.accepting = false            // 與下面的計數同一臨界區:之後的 append 不再產生塊
+                let tail = ch.chunker.flush()   // 尾塊仍屬這一段(ch.gen == gen);回來時若下一段已開錄,commit 進 closing
+                if tail != nil { ch.inflight += 1 }
+                pending += ch.inflight
+                ch.lock.unlock()
+                if let tail { tails.append((tail, ch)) }
+            }
+            let d = LiveStopDrain(generation: gen, label: "whisper", expected: pending,
+                                  take: { store.withLock { $0.takeClosing(gen) } },
+                                  onDone: { [weak self] lines in
+                                      self?.drainLock.withLockUnchecked { _ = self?.drains.removeValue(forKey: gen) }
+                                      completion?(lines)
+                                  })
+            drains[gen] = d
+            return d
         }
+        for (tail, ch) in tails { transcribe(tail, ch: ch, generation: gen) }
+        drain.activate()
     }
 }

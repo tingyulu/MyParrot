@@ -171,12 +171,28 @@ struct NotesTextView: NSViewRepresentable {
             isEditing = true
             parent.text = tv.string
             isEditing = false
-            highlight(tv)
+            scheduleHighlight(tv)
         }
 
-        /// NOTE-05：依 `MarkdownHighlight.spans` 套色（只改屬性，不動字、不進 undo）。
+        /// PERF-06：套色不再每鍵整篇重套——最後一鍵後 120 ms 跑一次；輸入法組字中（`hasMarkedText`）不碰屬性，
+        /// 等組字送出的那次 `textDidChange` 再排（嘸蝦米等 IME 的候選與底線不被打斷）。外部換檔（makeNSView／updateNSView）仍直接套。
+        static let highlightDebounce: TimeInterval = 0.12
+        private var highlightWork: DispatchWorkItem?
+        func scheduleHighlight(_ tv: NSTextView) {
+            highlightWork?.cancel()
+            let work = DispatchWorkItem { [weak self, weak tv] in
+                guard let self, let tv else { return }
+                // 二審:到期時還在組字 ⇒ 再排一輪(不靠「送出一定會再來一次 textDidChange」),組字結束那一刻就套。
+                if tv.hasMarkedText() { self.scheduleHighlight(tv); return }
+                self.highlight(tv)
+            }
+            highlightWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.highlightDebounce, execute: work)
+        }
+
+        /// NOTE-05：依 `MarkdownHighlight.spans` 套色（只改屬性，不動字、不進 undo）。組字中不套。
         func highlight(_ tv: NSTextView) {
-            guard let storage = tv.textStorage else { return }
+            guard !tv.hasMarkedText(), let storage = tv.textStorage else { return }
             let s = tv.string
             let full = NSRange(location: 0, length: (s as NSString).length)
             storage.beginEditing()

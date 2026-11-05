@@ -125,6 +125,15 @@ public enum SelfTest {
             protocolDirRules(),
             legacyLeaseFallback(),
             // #2646 MAS-08 商店版純函式(案例在 SelfTest+MAS.swift;兩種建置都要綠)
+            liveLineBuffer(),   // TR-29 #2672(案例在 SelfTest+LiveLines.swift)
+            liveLineStore(),    // TR-31 #2676(案例在 SelfTest+LiveLines.swift)
+            onceJoin(),         // TR-31 #2676
+            lateLiveFlushDecision(),   // TR-31 #2676
+            sidecarPairWrite(),        // TR-31 #2676 二審第二輪
+            permissionHintDecision(),          // PERM-02 #2673(案例在 SelfTest+Permissions.swift)
+            micSilentWarningByAuthorization(), // PERM-04 #2673
+            sysSilentBannerSplit(),            // PERM-05 #2673
+            uiRefreshThrottle(),               // PERF-01 Z 節(案例在 SelfTest+Perf.swift)
             masBuildFlavor(),
             masBookmarkStateMachine(),
             masRegistryWithoutCLI(),
@@ -1178,6 +1187,16 @@ public enum SelfTest {
             where !DebugCommand.isAllowedResultPath(ok, home: home, tmp: tmp) { fails.append("應允許 \(ok)") }
         for bad in ["relative.json", "/etc/passwd", "/Users/x/../y/r.json", "/Users/other/r.json", "/tmp/../etc/x", "/Library/x.json", ""]
             where DebugCommand.isAllowedResultPath(bad, home: home, tmp: tmp) { fails.append("應拒絕 \(bad)") }
+        // PERM-11(#2673):extraRoots(沙盒 build 的錄音夾)——在根底下放行、`..` 仍擋、相對根與空根忽略
+        let rec = "/Volumes/Ext/MyParrot-mas-test"   // 刻意不在 home／tmp 底下,才測得到 extraRoots 本身
+        if !DebugCommand.isAllowedResultPath(rec + "/perm-shots/a.png", home: home, tmp: tmp, extraRoots: [rec]) { fails.append("extraRoots 底下應允許") }
+        if DebugCommand.isAllowedResultPath(rec + "/../b.json", home: home, tmp: tmp, extraRoots: [rec]) { fails.append("extraRoots 含 .. 應拒絕") }
+        if DebugCommand.isAllowedResultPath(rec + "/a.png", home: home, tmp: tmp) { fails.append("沒給 extraRoots 不該放行錄音夾") }
+        if DebugCommand.isAllowedResultPath("/Volumes/Ext/MyParrot-mas-test-evil/a.png", home: home, tmp: tmp, extraRoots: [rec]) { fails.append("同前綴不同資料夾應拒絕") }
+        if DebugCommand.isAllowedResultPath("/anything/a.png", home: home, tmp: tmp, extraRoots: ["", "relative/root"]) { fails.append("空根／相對根應忽略") }
+        // 二審:過寬的根(`/`、`/Users`)丟掉;symlink 正規化後 /tmp 與 /private/tmp 同義
+        if DebugCommand.isAllowedResultPath("/anything/a.png", home: home, tmp: tmp, extraRoots: ["/", "/Users"]) { fails.append("過寬的根應丟掉") }
+        if !DebugCommand.isAllowedResultPath("/private/tmp/x.json", home: home, tmp: tmp) { fails.append("/private/tmp 應允許") }
         return Result(name: "DBG-01 控制通道指令切分與結果檔路徑", passed: fails.isEmpty,
                       detail: fails.isEmpty ? "切分 3 案、路徑允許 4 案/拒絕 7 案" : fails.joined(separator: ";"))
     }

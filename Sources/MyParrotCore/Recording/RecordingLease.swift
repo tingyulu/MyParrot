@@ -76,7 +76,7 @@ public enum LeaseError: Error, Equatable {
     case ioError(Int32)
 }
 
-public enum LeaseInspection: Equatable {
+public enum LeaseInspection: Equatable, Sendable {
     case none
     case alive(RecordingLease)
     case dead(RecordingLease)

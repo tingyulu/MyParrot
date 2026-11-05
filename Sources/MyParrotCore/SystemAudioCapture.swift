@@ -11,6 +11,11 @@ import os
 /// 主執行緒 1.4 s),所以 start／stop 搬到專用序列佇列 `controlQueue`、完成回 main;`stop()` 呼叫當下
 /// 翻 `muted`,IOProc 立刻丟 buffer。tap／aggregate／IOProc id 等狀態只在 `controlQueue` 上讀寫;
 /// IOProc 跑在自己的 `queue`(既有)。`@unchecked Sendable` 由這個佇列紀律保證。
+/// PERM-05(#2673):對方軌目標輸出裝置的傳輸類型快照。
+enum OutputTransport: Sendable, Equatable {
+    case bluetooth, other, unknown
+}
+
 final class SystemAudioCapture: @unchecked Sendable {
 
     var onBuffer: ((AVAudioPCMBuffer) -> Void)?
@@ -29,6 +34,11 @@ final class SystemAudioCapture: @unchecked Sendable {
     private var tapID = AudioObjectID.unknown
     /// AUD-40:建 aggregate 時用的那顆**真實輸出裝置**(不是 aggregate);看門狗判死前查它是否在跑。controlQueue-confined。
     private var outputDeviceID = AudioObjectID.unknown
+    /// PERM-05(#2673):目標輸出裝置的傳輸類型(HFP 只發生在藍牙輸出)。在 `controlQueue` 上跟 `outputDeviceID` 一起讀、
+    /// 一起清;main 只讀這個快照決定對方軌無聲警告的文案(藍牙 ⇒ HFP 說法;其他 ⇒ 請確認播放／可能是權限)。
+    /// 二審:tap 還沒建好、建失敗、讀不到、輸出切換到重建完成之間都是 `.unknown` ⇒ 用舊的 HFP 文案、不推論權限(lock 只保證讀寫安全,不保證新鮮)。
+    private let outputTransportLock = OSAllocatedUnfairLock(initialState: OutputTransport.unknown)
+    var outputTransport: OutputTransport { outputTransportLock.withLock { $0 } }
     private var aggregateID = AudioObjectID.unknown
     private var inputStreamID = AudioObjectID.unknown
     private var procID: AudioDeviceIOProcID?
@@ -187,6 +197,9 @@ final class SystemAudioCapture: @unchecked Sendable {
         let outputID = try AudioObjectID.readDefaultSystemOutputDevice()
         let outputUID = try outputID.readDeviceUID()
         outputDeviceID = outputID   // AUD-40
+        // PERM-05:先讀起來,整條(aggregate／IOProc／start)都成功才 commit;中途 throw 由 start() 的 teardown 清回 unknown(二審第二輪)。
+        let transport: OutputTransport = (try? outputID.read(kAudioDevicePropertyTransportType, defaultValue: UInt32(0)))
+            .map { $0 == kAudioDeviceTransportTypeBluetooth || $0 == kAudioDeviceTransportTypeBluetoothLE ? .bluetooth : .other } ?? .unknown
 
         let aggregateDesc: [String: Any] = [
             kAudioAggregateDeviceNameKey: "MyParrot-SystemTap",
@@ -249,6 +262,7 @@ final class SystemAudioCapture: @unchecked Sendable {
         guard err == noErr else { throw "Failed to start device (\(err))" }
 
         isRunning = true
+        outputTransportLock.withLock { $0 = transport }   // PERM-05:到這裡才算建好
         ok = true
     }
 
@@ -315,6 +329,7 @@ final class SystemAudioCapture: @unchecked Sendable {
         defer { os_log("MyParrot sys: stop %ldms", Self.ms(since: t0)) }
         isRunning = false
         outputDeviceID = .unknown   // AUD-40
+        outputTransportLock.withLock { $0 = .unknown }   // PERM-05:拆掉就不知道了(重建完成前不推論)
         rateWindowStart = 0; rateFrames = 0
         nextExpectedSampleTime = -1; gapFramesFilled = 0   // BUG-25: sample timeline resets with the tap
         inputStreamID = .unknown
